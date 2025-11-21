@@ -7,7 +7,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const recordHint = document.getElementById("record-hint");
     const recordingVisual = document.querySelector(".recording-visual");
     const sttText = document.getElementById("stt-text");
-    
+
+    // Elementos del módulo de cara
+    const faceStatusPill = document.getElementById("face-status-pill");
+    const faceImage = document.getElementById("face-image");
+
     // Elementos de la barra de progreso (Pipeline)
     const pipelineProgressBar = document.getElementById("pipeline-progress-bar");
     const pipelineTimeline = document.getElementById("pipeline-timeline");
@@ -17,22 +21,28 @@ document.addEventListener("DOMContentLoaded", () => {
     // ==================================================
     if (recordBtn) {
         recordBtn.addEventListener("click", async () => {
-            
+
             // Evitar pulsar dos veces si ya está escuchando
             if (recordBtn.classList.contains("recording")) return;
 
             // --- A. CAMBIAR UI A MODO "ESCUCHANDO" ---
             console.log("🎤 Enviando orden de escuchar al robot...");
-            
+
             // Activar animaciones CSS
             recordBtn.classList.add("recording");
             if (recordingVisual) recordingVisual.classList.add("recording");
-            
+
             // Actualizar textos y etiquetas
-            audioStatusPill.textContent = "Robot escuchando...";
-            audioStatusPill.className = "status-pill status-active"; // Verde/Activo
-            recordHint.textContent = "Habla alto y claro al micrófono del robot";
-            sttText.innerHTML = '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
+            if (audioStatusPill) {
+                audioStatusPill.textContent = "Robot escuchando...";
+                audioStatusPill.className = "status-pill status-active"; // Verde/Activo
+            }
+            if (recordHint) {
+                recordHint.textContent = "Habla alto y claro al micrófono del robot";
+            }
+            if (sttText) {
+                sttText.innerHTML = '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
+            }
 
             try {
                 // --- B. LLAMADA AL BACKEND (TRIGGER) ---
@@ -54,36 +64,52 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (data.ok) {
                     // ÉXITO: El robot entendió y generó el prompt
                     console.log("✅ Prompt recibido:", data.transcript);
-                    
-                    audioStatusPill.textContent = "Completado";
-                    audioStatusPill.className = "status-pill status-done"; 
-                    recordHint.textContent = "Pulsa para grabar otra vez";
-                    
+
+                    if (audioStatusPill) {
+                        audioStatusPill.textContent = "Completado";
+                        audioStatusPill.className = "status-pill status-done";
+                    }
+                    if (recordHint) {
+                        recordHint.textContent = "Pulsa para grabar otra vez";
+                    }
+
                     // Mostrar el prompt en inglés en la caja
-                    sttText.innerText = data.transcript;
-                    
+                    if (sttText) {
+                        sttText.innerText = data.transcript;
+                    }
+
                     // Actualizar visualmente el paso en la timeline
-                    markStageAsDone('speech');
+                    markStageAsDone("speech");
 
                 } else {
                     // ERROR LÓGICO: El robot escuchó pero no entendió o se canceló
                     console.warn("⚠️", data.message);
-                    audioStatusPill.textContent = "No entendido";
-                    audioStatusPill.className = "status-pill status-pending"; // Naranja
-                    recordHint.textContent = "Inténtalo de nuevo";
-                    sttText.innerHTML = `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
+                    if (audioStatusPill) {
+                        audioStatusPill.textContent = "No entendido";
+                        audioStatusPill.className = "status-pill status-pending"; // Naranja
+                    }
+                    if (recordHint) {
+                        recordHint.textContent = "Inténtalo de nuevo";
+                    }
+                    if (sttText) {
+                        sttText.innerHTML = `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
+                    }
                 }
 
             } catch (err) {
                 // --- D. ERROR DE RED/SERVIDOR ---
                 console.error("❌ Error de conexión:", err);
-                
+
                 recordBtn.classList.remove("recording");
                 if (recordingVisual) recordingVisual.classList.remove("recording");
-                
-                audioStatusPill.textContent = "Error de Conexión";
-                audioStatusPill.className = "status-pill status-pending";
-                sttText.innerText = "Error: El servidor Python no responde o el micrófono falló.";
+
+                if (audioStatusPill) {
+                    audioStatusPill.textContent = "Error de Conexión";
+                    audioStatusPill.className = "status-pill status-pending";
+                }
+                if (sttText) {
+                    sttText.innerText = "Error: El servidor Python no responde o el micrófono falló.";
+                }
             }
         });
     }
@@ -107,15 +133,17 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!pipelineTimeline) return;
 
             const stageMap = {};
-            (data.stages || []).forEach(s => stageMap[s.id] = s.status);
+            (data.stages || []).forEach(s => {
+                stageMap[s.id] = s.status;
+            });
 
             pipelineTimeline.querySelectorAll("li").forEach(li => {
                 const stageId = li.getAttribute("data-stage");
                 const status = stageMap[stageId] || "pending";
-                
-                // Resetear clases
-                li.classList.remove("done", "active", "pending"); // Ajusta según tu CSS
-                li.setAttribute("data-status", status); // Para que el CSS nuevo funcione
+
+                // Resetear clases si tu CSS las usa, pero principalmente usamos data-status
+                li.classList.remove("done", "active", "pending");
+                li.setAttribute("data-status", status);
             });
 
         } catch (err) {
@@ -127,10 +155,66 @@ document.addEventListener("DOMContentLoaded", () => {
     function markStageAsDone(stageId) {
         if (!pipelineTimeline) return;
         const li = pipelineTimeline.querySelector(`li[data-stage="${stageId}"]`);
-        if (li) li.setAttribute("data-status", "done");
+        if (li) {
+            li.setAttribute("data-status", "done");
+        }
     }
 
     // Iniciar el bucle de estado
     setInterval(refreshPipelineStatus, 2000);
     refreshPipelineStatus();
+
+    // ==================================================
+    // 3. MÓDULO DE CARA: STREAM + ESTADO
+    // ==================================================
+    async function refreshFaceModule() {
+        try {
+            // 1) Actualizar imagen de la cámara
+            if (faceImage) {
+                // Añadimos timestamp para evitar caché del navegador
+                faceImage.src = `/api/face-frame?t=${Date.now()}`;
+            }
+
+            // 2) Actualizar pill de estado (cara / sonrisa / captura)
+            if (faceStatusPill) {
+                const res = await fetch("/api/face-status");
+                if (!res.ok) return;
+
+                const data = await res.json();
+                const happy = data.happy || 0;
+                const threshold = data.happy_threshold || 60;
+
+                if (data.photo_taken) {
+                    faceStatusPill.textContent = "Foto capturada";
+                    faceStatusPill.className = "status-pill status-done";
+
+                    // Marcamos también la etapa de captura en la timeline
+                    markStageAsDone("face_capture");
+
+                } else if (data.face_present) {
+                    faceStatusPill.textContent =
+                        `Rostro detectado (${happy.toFixed(0)}% feliz)`;
+
+                    if (happy >= threshold) {
+                        faceStatusPill.className = "status-pill status-active";
+                    } else {
+                        faceStatusPill.className = "status-pill status-idle";
+                    }
+
+                    // Marcamos la etapa de detección cuando haya rostro
+                    markStageAsDone("face_detect");
+
+                } else {
+                    faceStatusPill.textContent = "Esperando rostro";
+                    faceStatusPill.className = "status-pill status-idle";
+                }
+            }
+        } catch (err) {
+            console.error("Error refrescando módulo de cara:", err);
+        }
+    }
+
+    // Refrescar cara cada 500 ms
+    setInterval(refreshFaceModule, 800);
+    refreshFaceModule();
 });

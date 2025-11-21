@@ -1,3 +1,24 @@
+# ========================
+#  Web server (Flask)
+# ========================
+Flask>=3.0.0
+flask-cors>=4.0.0
+
+# ========================
+#  Visión / DeepFace (sonrisa)
+# ========================
+deepface>=0.0.95
+opencv-python>=4.5.5.64
+tensorflow>=2.16.0      # o cambia a 'tensorflow-cpu>=2.16.0' si NO quieres usar la GPU
+numpy>=1.24.0
+
+# DeepFace instalará automáticamente:
+# - pandas, Pillow, gdown, mtcnn, retina-face, etc. (no hace falta listarlos a mano)
+# https://github.com/serengil/deepface/blob/master/requirements.txt
+
+# ========================
+#  Lo que ya tenías (voz, scraping, etc.)
+# ========================
 beautifulsoup4==4.14.2
 certifi==2025.11.12
 cffi==2.0.0

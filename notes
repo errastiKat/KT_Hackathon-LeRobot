@@ -1,0 +1,52 @@
+export TF_USE_LEGACY_KERAS=1
+
+# 0) (opcional) Asegura que tienes todas las libs cu12 instaladas en el venv
+pip3 install --upgrade --no-cache-dir \
+  "onnxruntime-gpu>=1.23" \
+  "nvidia-cuda-runtime-cu12>=12,<13" \
+  "nvidia-cuda-nvrtc-cu12>=12,<13" \
+  "nvidia-cuda-cupti-cu12>=12,<13" \
+  "nvidia-cublas-cu12>=12,<13" \
+  "nvidia-cufft-cu12>=11,<12" \
+  "nvidia-curand-cu12>=10,<11" \
+  "nvidia-cusolver-cu12>=11,<12" \
+  "nvidia-cusparse-cu12>=12,<13" \
+  "nvidia-cudnn-cu12>=9,<10" \
+  "nvidia-nvjitlink-cu12>=12,<13"
+
+# 1) Localiza site-packages del venv
+BASE=$(python3 - <<'PY'
+import site, os
+c=[]
+try: c+=site.getsitepackages()
+except Exception: pass
+c.append(site.getusersitepackages())
+for p in c:
+    if p and os.path.isdir(p):
+        print(p); break
+PY
+)
+
+# 2) Recoge todas las carpetas .../site-packages/nvidia/*/lib*
+CU_PATHS=$(find "$BASE/nvidia" -maxdepth 2 -type d -name 'lib*' 2>/dev/null | paste -sd: -)
+
+# 3) Exporta LD_LIBRARY_PATH para esta shell
+[ -n "$CU_PATHS" ] && export LD_LIBRARY_PATH="$CU_PATHS:${LD_LIBRARY_PATH}"
+
+# 4) Comprueba que aparecen rutas como .../nvidia/cublas/lib y .../nvidia/cufft/lib
+echo "LD_LIBRARY_PATH:"
+echo "$LD_LIBRARY_PATH" | tr ':' '\n' | sed '/^$/d'
+
+# 5) Test rápido de ONNX Runtime (debe mostrar CUDAExecutionProvider)
+python3 - << 'PY'
+import onnxruntime as ort, numpy as np, os
+print("available providers:", ort.get_available_providers())
+m = os.environ.get("ARC_FACE_ONNX","glintr100.onnx")
+sess = ort.InferenceSession(m, providers=["CUDAExecutionProvider","CPUExecutionProvider"])
+print("session providers:", sess.get_providers())
+xname = sess.get_inputs()[0].name
+yname = sess.get_outputs()[0].name
+x = (np.zeros((1,3,112,112),dtype=np.float32))
+y = sess.run([yname], {xname:x})[0]
+print("ok salida:", y.shape, y.dtype)
+PY
