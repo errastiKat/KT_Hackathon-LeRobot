@@ -1,41 +1,5 @@
-# ============================
-# Virtual environments
-# ============================
+# --- Entornos y Temporales ---
 env/
-venv/
-.env/
-.venv/
-*/env/
-*/venv/
-*/.env/
-*/.venv/
-
-# pipenv
-Pipfile.lock
-
-# ============================
-# Python cache / compiled
-# ============================
 __pycache__/
-*.py[cod]
-*$py.class
-
-# ============================
-# Logs / dumps
-# ============================
-*.log
-*.pot
 *.pyc
-
-# ============================
-# Tools / IDEs
-# ============================
-.vscode/
-.idea/
-*.swp
-
-# ============================
-# Sistema
-# ============================
 .DS_Store
-Thumbs.db
