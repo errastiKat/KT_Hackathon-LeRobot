@@ -9,7 +9,7 @@
                 <h1 class="h3 fw-semibold mb-2">De una sonrisa a un dibujo en papel</h1>
                 <p class="text-secondary mb-0">
                     1) La cámara detecta tu cara y espera a que sonrías.<br>
-                    2) Grabas una frase por voz para describir el objeto (gorro, gafas, etc.).<br>
+                    2) Grabas una frase por voz para describir el objeto.<br>
                     3) La IA edita la imagen y LeRobot la dibuja en papel.
                 </p>
             </div>
@@ -29,9 +29,7 @@
     </div>
 </div>
 
-<!-- Primera fila: vídeo de reconocimiento + grabadora -->
 <div class="row g-4 mb-4">
-    <!-- Reconocimiento facial -->
     <div class="col-lg-7">
         <div class="card glass-card h-100">
             <div class="card-header d-flex justify-content-between align-items-center border-0">
@@ -39,7 +37,7 @@
                     <span class="badge bg-primary-soft me-2">
                         <i class="bi bi-camera-video me-1"></i>Reconocimiento facial
                     </span>
-                    <span class="text-secondary small">Esperando sonrisa para capturar la foto automáticamente</span>
+                    <span class="text-secondary small">Esperando sonrisa...</span>
                 </div>
                 <span class="status-pill status-idle" id="face-status-pill">
                     Esperando rostro
@@ -47,25 +45,18 @@
             </div>
             <div class="card-body">
                 <div class="video-frame mb-2">
-                    <!--
-                      AQUÍ inyectarás tu stream de vídeo de reconocimiento facial.
-                      Por ejemplo, cuando lo tengas:
-                        <img src="{{ url_for('face_stream') }}" class="w-100 h-100 object-fit-cover">
-                      De momento dejamos una imagen/placeholder.
-                    -->
                     <img src="{{ url_for('static', filename='img/face_placeholder.jpg') }}"
                          class="w-100 h-100 object-fit-cover"
                          alt="Stream de reconocimiento facial">
                 </div>
                 <div class="d-flex justify-content-between align-items-center small text-secondary">
-                    <span><i class="bi bi-bounding-box-circles me-1"></i>La cara se enmarca en tiempo real</span>
-                    <span><i class="bi bi-emoji-smile me-1"></i>La captura se dispara sólo al sonreír</span>
+                    <span><i class="bi bi-bounding-box-circles me-1"></i>Encuadre en tiempo real</span>
+                    <span><i class="bi bi-emoji-smile me-1"></i>Sonríe para capturar</span>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Grabadora de voz -->
     <div class="col-lg-5">
         <div class="card glass-card h-100">
             <div class="card-header border-0 d-flex justify-content-between align-items-center">
@@ -73,12 +64,10 @@
                     <span class="badge bg-success-soft me-2">
                         <i class="bi bi-mic-fill me-1"></i>Grabador de frase
                     </span>
-                    <span class="text-secondary small">
-                        Sin botones extra: solo grabar y mandar al backend
-                    </span>
+                    <span class="text-secondary small">Solo grabar y enviar</span>
                 </div>
                 <span class="status-pill status-idle" id="audio-status-pill">
-                    Listo para grabar
+                    Listo
                 </span>
             </div>
             <div class="card-body d-flex flex-column">
@@ -87,11 +76,10 @@
                         <i class="bi bi-mic-fill"></i>
                     </button>
                     <div class="small text-secondary mt-2 text-center" id="record-hint">
-                        Pulsa para empezar / parar la grabación
+                        Pulsa para grabar
                     </div>
                 </div>
 
-                <!-- “Waveform” / indicador visual simple -->
                 <div class="recording-visual mb-3">
                     <div class="recording-bar"></div>
                     <div class="recording-bar"></div>
@@ -100,13 +88,12 @@
                     <div class="recording-bar"></div>
                 </div>
 
-                <!-- Transcripción (cuando el backend de STT responda) -->
                 <div class="flex-grow-1">
                     <label class="form-label small text-secondary mb-1">
-                        Transcripción (Speech-to-Text)
+                        Transcripción
                     </label>
                     <div class="stt-box" id="stt-text">
-                        <span class="placeholder-text">Aquí aparecerá la frase reconocida por voz…</span>
+                        <span class="placeholder-text">La frase aparecerá aquí...</span>
                     </div>
                 </div>
             </div>
@@ -114,84 +101,69 @@
     </div>
 </div>
 
-<!-- Segunda fila: Resultado IA + estado del pipeline + vídeo del robot -->
 <div class="row g-4">
-    <!-- Resultado IA + timeline -->
     <div class="col-lg-7">
         <div class="card glass-card h-100">
             <div class="card-header border-0 d-flex justify-content-between align-items-center">
                 <div>
                     <span class="badge bg-info-soft me-2">
-                        <i class="bi bi-stars me-1"></i>Resultado de la IA
+                        <i class="bi bi-stars me-1"></i>Resultado IA
                     </span>
-                    <span class="text-secondary small">
-                        Imagen editada con el objeto (gorro, gafas, etc.)
-                    </span>
+                    <span class="text-secondary small">Imagen procesada</span>
                 </div>
                 <span class="status-pill status-pending" id="ia-status-pill">
-                    Esperando IA
+                    Pendiente
                 </span>
             </div>
             <div class="card-body row g-3">
                 <div class="col-md-6">
                     <div class="video-frame mb-2">
-                        <!-- Placeholder de imagen IA -->
                         <img src="{{ url_for('static', filename='img/ia_placeholder.jpg') }}"
                              id="ia-image"
                              class="w-100 h-100 object-fit-cover"
                              alt="Resultado IA">
                     </div>
                     <div class="small text-secondary">
-                        Esta será la imagen que se mande a la etapa de extracción de contornos.
+                        Input para el robot.
                     </div>
                 </div>
                 <div class="col-md-6">
-                    <h6 class="small text-uppercase text-secondary mb-2">Pipeline del proceso</h6>
+                    <h6 class="small text-uppercase text-secondary mb-2">Pipeline</h6>
                     <ul class="timeline small" id="pipeline-timeline">
-                        <!--
-                          Estos elementos se actualizarán desde JS según /api/status.
-                          Puedes tocar IDs si quieres, pero así el JS ya tiene ganchos.
-                        -->
                         <li data-stage="face_detect">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Detección de rostro</div>
-                                <div class="subtitle">Webcam detecta la cara en tiempo real.</div>
+                                <div class="title">Detección</div>
                             </div>
                         </li>
                         <li data-stage="face_capture">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Captura de foto</div>
-                                <div class="subtitle">Se dispara automáticamente al sonreír.</div>
+                                <div class="title">Captura</div>
                             </div>
                         </li>
                         <li data-stage="speech">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Frase grabada</div>
-                                <div class="subtitle">Se procesa el audio con Speech-to-Text.</div>
+                                <div class="title">Audio/STT</div>
                             </div>
                         </li>
                         <li data-stage="ia_edit">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Edición IA</div>
-                                <div class="subtitle">Se aplica el objeto (gorro, gafas, etc.).</div>
+                                <div class="title">IA Generativa</div>
                             </div>
                         </li>
                         <li data-stage="contours">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Extracción de contornos</div>
-                                <div class="subtitle">Se genera el trazo para LeRobot.</div>
+                                <div class="title">Contornos</div>
                             </div>
                         </li>
                         <li data-stage="robot_draw">
                             <span class="dot"></span>
                             <div class="content">
-                                <div class="title">Dibujo en LeRobot</div>
-                                <div class="subtitle">El robot dibuja en papel en tiempo real.</div>
+                                <div class="title">Robot</div>
                             </div>
                         </li>
                     </ul>
@@ -200,36 +172,27 @@
         </div>
     </div>
 
-    <!-- Vídeo del robot dibujando -->
     <div class="col-lg-5">
         <div class="card glass-card h-100">
             <div class="card-header border-0 d-flex justify-content-between align-items-center">
                 <div>
                     <span class="badge bg-warning-soft me-2">
-                        <i class="bi bi-vector-pen me-1"></i>Cámara del robot
+                        <i class="bi bi-vector-pen me-1"></i>Cam Robot
                     </span>
-                    <span class="text-secondary small">
-                        Vista desde la webcam externa mientras dibuja
-                    </span>
+                    <span class="text-secondary small">En vivo</span>
                 </div>
                 <span class="status-pill status-idle" id="robot-status-pill">
-                    A la espera de dibujo
+                    Espera
                 </span>
             </div>
             <div class="card-body">
                 <div class="video-frame mb-2">
-                    <!--
-                      AQUÍ inyectarás tu stream de la webcam del robot.
-                      Ejemplo futuro:
-                        <img src="{{ url_for('robot_stream') }}" ... >
-                    -->
                     <img src="{{ url_for('static', filename='img/robot_placeholder.jpg') }}"
                          class="w-100 h-100 object-fit-cover"
-                         alt="Stream de la cámara del robot">
+                         alt="Stream Robot">
                 </div>
                 <div class="small text-secondary d-flex justify-content-between">
-                    <span><i class="bi bi-clock-history me-1"></i>Seguimiento en vivo del trazado</span>
-                    <span><i class="bi bi-square me-1"></i>Sin controles: solo visualización</span>
+                    <span><i class="bi bi-eye me-1"></i>Visualización</span>
                 </div>
             </div>
         </div>

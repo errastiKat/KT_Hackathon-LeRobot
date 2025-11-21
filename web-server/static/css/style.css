@@ -1,237 +1,265 @@
 :root {
-    --bg-main: #050818;
-    --bg-card: rgba(15, 20, 40, 0.95);
-    --bg-card-soft: rgba(18, 24, 45, 0.9);
-    --border-subtle: rgba(255, 255, 255, 0.06);
-    --accent: #4f9cff;
-    --accent-soft: rgba(79, 156, 255, 0.12);
-    --accent-success: #2ecc71;
-    --accent-warning: #ffb347;
-    --accent-danger: #ff5c7a;
-    --text-main: #f5f7ff;
-    --text-muted: #9aa3c7;
+    /* --- PALETA DE COLORES (LIGHT MODE) --- */
+    --bg-main: #f3f5f9;          /* Gris muy suave de fondo (tipo escritorio) */
+    --bg-card: #ffffff;          /* Blanco puro para tarjetas */
+    --bg-hero: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); /* Gradiente Indigo-Purple */
+    
+    /* Bordes y Separadores */
+    --border-subtle: #e2e8f0;    
+    
+    /* Textos */
+    --text-main: #1e293b;        /* Gris casi negro (más suave que el negro puro) */
+    --text-muted: #64748b;       /* Gris medio para subtítulos */
+    --text-inverse: #ffffff;     /* Texto para elementos con fondo oscuro (Hero/Botones) */
+
+    /* Acentos */
+    --accent: #4f46e5;           /* Color principal (Indigo) */
+    --accent-success: #10b981;   /* Verde esmeralda */
+    --accent-warning: #f59e0b;   /* Ámbar */
+    --accent-danger: #ef4444;    /* Rojo */
+
+    /* Sombras (La clave del diseño moderno) */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    --shadow-hero: 0 20px 25px -5px rgb(99 102 241 / 0.25), 0 8px 10px -6px rgb(99 102 241 / 0.25);
 }
 
 body.app-body {
-    min-height: 100vh;
-    background:
-        radial-gradient(circle at 0% 0%, #182848 0, transparent 55%),
-        radial-gradient(circle at 100% 100%, #4b6cb7 0, transparent 55%),
-        radial-gradient(circle at 0% 100%, #182848 0, transparent 55%),
-        var(--bg-main);
+    background-color: var(--bg-main);
     color: var(--text-main);
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    /* Tipografía moderna del sistema */
+    font-family: 'Inter', system-ui, -apple-system, sans-serif; 
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased; /* Texto más nítido en Mac */
 }
 
-/* Navbar */
+/* --- NAVBAR --- */
 .glass-nav {
-    background: linear-gradient(to right, rgba(5, 8, 24, 0.85), rgba(5, 8, 24, 0.65));
-    backdrop-filter: blur(18px);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    background-color: rgba(255, 255, 255, 0.85); /* Blanco translúcido */
+    backdrop-filter: blur(12px); /* Efecto cristal esmerilado */
+    border-bottom: 1px solid var(--border-subtle);
+    position: sticky;
+    top: 0;
+    z-index: 1000;
 }
 
-/* Cards */
-.glass-card,
-.hero-card {
-    background: var(--bg-card-soft);
-    border-radius: 1.5rem;
+.glass-nav .navbar-brand {
+    color: var(--accent) !important;
+    font-weight: 700;
+}
+
+.glass-nav .small {
+    color: var(--text-muted);
+}
+
+/* --- CARDS (Tarjetas limpias) --- */
+.glass-card {
+    background: var(--bg-card);
     border: 1px solid var(--border-subtle);
-    backdrop-filter: blur(22px);
-    box-shadow:
-        0 18px 45px rgba(0, 0, 0, 0.6),
-        0 0 0 1px rgba(255, 255, 255, 0.02);
+    border-radius: 1rem; /* Bordes redondeados modernos (16px) */
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-card:hover {
+    transform: translateY(-2px); /* Pequeña elevación */
+    box-shadow: var(--shadow-md);
 }
 
 .card-header {
     background: transparent;
+    border-bottom: 1px solid #f1f5f9;
+    padding: 1.25rem 1.5rem;
 }
 
-/* Hero */
+.card-body {
+    padding: 1.5rem;
+}
+
+/* --- HERO SECTION (La tarjeta principal de color) --- */
 .hero-card {
+    background: var(--bg-hero);
+    color: var(--text-inverse);
+    border-radius: 1.25rem;
+    box-shadow: var(--shadow-hero);
+    border: none;
     position: relative;
     overflow: hidden;
 }
 
-.hero-card::before {
+/* Decoración sutil en el Hero */
+.hero-card::after {
     content: "";
     position: absolute;
-    inset: 0;
-    background: radial-gradient(circle at 110% -20%, rgba(79, 156, 255, 0.35), transparent 55%);
-    opacity: 0.9;
+    top: 0; right: 0; bottom: 0; left: 0;
+    background: linear-gradient(to bottom right, rgba(255,255,255,0.1), transparent);
     pointer-events: none;
 }
 
-/* Progress bar */
+.hero-card h1, 
+.hero-card .text-secondary {
+    color: var(--text-inverse) !important; /* Fuerza texto blanco en el Hero */
+}
+
+/* --- PROGRESS BAR --- */
 .pipeline-progress {
-    width: 220px;
-    height: 0.6rem;
-    background: rgba(10, 14, 30, 0.9);
+    background: rgba(255, 255, 255, 0.2); /* Fondo semitransparente */
     border-radius: 999px;
+    height: 0.5rem;
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    width: 200px;
 }
 
 .pipeline-progress .progress-bar {
-    background: linear-gradient(90deg, #4f9cff, #9b7bff);
+    background-color: #ffffff; /* Barra blanca pura */
 }
 
-/* Video frames (para streams) */
+/* --- VIDEO FRAMES --- */
 .video-frame {
-    position: relative;
-    border-radius: 1.1rem;
-    background: radial-gradient(circle at 10% 0, rgba(79, 156, 255, 0.25), rgba(5, 8, 24, 0.95));
-    padding: 0.25rem;
+    background-color: #f1f5f9; /* Gris muy claro placeholder */
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-subtle);
     overflow: hidden;
-    min-height: 220px;
+    aspect-ratio: 16/9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
-.video-frame img,
-.video-frame video {
-    border-radius: 0.9rem;
+.video-frame img {
+    width: 100%;
+    height: 100%;
     object-fit: cover;
 }
 
-/* Badges suaves */
-.bg-primary-soft {
-    background: rgba(79, 156, 255, 0.12);
-    color: #c8ddff;
+/* --- BADGES (Etiquetas de color suave) --- */
+.badge {
+    padding: 0.5em 0.8em;
+    font-weight: 600;
+    border-radius: 0.5rem;
 }
+.bg-primary-soft { background-color: #e0e7ff; color: #4338ca; }
+.bg-success-soft { background-color: #d1fae5; color: #065f46; }
+.bg-info-soft    { background-color: #e0f2fe; color: #075985; }
+.bg-warning-soft { background-color: #fef3c7; color: #92400e; }
 
-.bg-success-soft {
-    background: rgba(46, 204, 113, 0.12);
-    color: #bfead1;
-}
-
-.bg-info-soft {
-    background: rgba(79, 209, 255, 0.12);
-    color: #c6f4ff;
-}
-
-.bg-warning-soft {
-    background: rgba(255, 179, 71, 0.12);
-    color: #ffe0b3;
-}
-
-/* Status pills */
+/* --- STATUS PILLS --- */
 .status-pill {
-    border-radius: 999px;
-    padding: 0.15rem 0.75rem;
     font-size: 0.75rem;
-    font-weight: 500;
-    border: 1px solid transparent;
+    font-weight: 600;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 
 .status-idle {
-    background: rgba(255, 255, 255, 0.02);
-    color: var(--text-muted);
-    border-color: rgba(255, 255, 255, 0.05);
-}
-
-.status-active {
-    background: rgba(79, 156, 255, 0.14);
-    border-color: rgba(79, 156, 255, 0.4);
-    color: #cfe1ff;
+    background: #f1f5f9;
+    color: #64748b;
 }
 
 .status-pending {
-    background: rgba(255, 179, 71, 0.08);
-    border-color: rgba(255, 179, 71, 0.45);
-    color: #ffe2b5;
+    background: #fff7ed;
+    color: #c2410c;
+    border: 1px solid #ffedd5;
 }
 
-.status-done {
-    background: rgba(46, 204, 113, 0.15);
-    border-color: rgba(46, 204, 113, 0.4);
-    color: #c2f3d7;
+.status-active {
+    background: #f0fdf4;
+    color: #15803d;
+    border: 1px solid #dcfce7;
 }
 
-/* Botón de grabar (micro grande) */
+/* --- BOTÓN DE GRABAR --- */
 .record-btn {
-    width: 80px;
-    height: 80px;
-    border-radius: 999px;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
     border: none;
-    background: radial-gradient(circle at 30% 0%, #ff7b7b, #ff416c);
+    background-color: var(--accent-danger);
     color: white;
-    display: inline-flex;
+    font-size: 1.5rem;
+    display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 2rem;
-    box-shadow:
-        0 10px 25px rgba(0, 0, 0, 0.6),
-        0 0 0 3px rgba(255, 65, 108, 0.15);
-    transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+    cursor: pointer;
+    box-shadow: 0 4px 6px -1px rgba(239, 68, 68, 0.4);
+    transition: all 0.2s ease;
 }
 
 .record-btn:hover {
-    transform: translateY(-1px) scale(1.02);
-    filter: brightness(1.05);
+    transform: scale(1.05);
+    background-color: #dc2626;
 }
 
-.record-btn:active {
-    transform: translateY(1px) scale(0.97);
-    box-shadow:
-        0 4px 12px rgba(0, 0, 0, 0.7),
-        0 0 0 3px rgba(255, 65, 108, 0.3);
-}
-
-/* Estado grabando (añadido desde JS) */
 .record-btn.recording {
-    background: radial-gradient(circle at 30% 0%, #ffb347, #ff416c);
-    box-shadow:
-        0 0 30px rgba(255, 65, 108, 0.9),
-        0 0 0 4px rgba(255, 65, 108, 0.35);
+    background-color: white;
+    color: var(--accent-danger);
+    border: 2px solid var(--accent-danger);
+    animation: pulse 1.5s infinite;
 }
 
-/* Visual de grabación (barras) */
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* --- VISUALIZADOR DE AUDIO --- */
 .recording-visual {
-    height: 40px;
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 6px;
-    align-items: end;
+    height: 30px;
+    display: flex;
+    gap: 4px;
+    align-items: flex-end;
+    justify-content: center;
 }
 
 .recording-bar {
-    height: 12px;
-    border-radius: 999px;
-    background: linear-gradient(180deg, rgba(79, 156, 255, 0.7), rgba(79, 156, 255, 0.05));
-    opacity: 0.4;
-    transition: height 0.2s ease, opacity 0.2s ease;
+    width: 6px;
+    height: 4px;
+    background-color: var(--accent);
+    border-radius: 4px;
+    transition: height 0.1s ease;
+    opacity: 0.3;
 }
 
 .recording-visual.recording .recording-bar {
-    opacity: 0.9;
+    opacity: 1;
+    /* Aquí podrías añadir una animación de altura si quisieras */
 }
 
-/* Caja de STT */
+/* --- CAJA STT (Speech to Text) --- */
 .stt-box {
-    min-height: 72px;
-    border-radius: 0.9rem;
-    border: 1px dashed rgba(255, 255, 255, 0.16);
-    padding: 0.75rem 0.9rem;
-    background: radial-gradient(circle at 0% 0%, rgba(79, 156, 255, 0.18), rgba(5, 8, 24, 0.92));
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.75rem;
+    padding: 1rem;
     color: var(--text-main);
-    font-size: 0.9rem;
+    font-size: 0.95rem;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
 }
 
 .placeholder-text {
-    color: var(--text-muted);
+    color: #94a3b8;
+    font-style: italic;
 }
 
-/* Timeline */
+/* --- TIMELINE --- */
 .timeline {
-    position: relative;
     list-style: none;
+    padding: 0;
     margin: 0;
-    padding: 0.25rem 0 0.25rem 1.25rem;
-    border-left: 1px dashed rgba(255, 255, 255, 0.12);
+    padding-left: 1rem;
+    border-left: 2px solid #e2e8f0;
 }
 
 .timeline li {
     position: relative;
-    margin-bottom: 0.8rem;
-    padding-left: 0.5rem;
+    padding-left: 1.5rem;
+    margin-bottom: 1.5rem;
 }
 
 .timeline li:last-child {
@@ -240,66 +268,33 @@ body.app-body {
 
 .timeline .dot {
     position: absolute;
-    left: -0.56rem;
-    top: 0.3rem;
-    width: 11px;
-    height: 11px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 2px solid rgba(255, 255, 255, 0.22);
-    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.6);
+    left: -7px; /* Centrado en la línea de 2px */
+    top: 0.25rem;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #e2e8f0;
+    border: 2px solid #ffffff;
+    transition: background-color 0.3s ease;
 }
 
-.timeline .content .title {
-    font-weight: 500;
-    font-size: 0.86rem;
+/* Estados de la Timeline */
+.timeline li[data-status="done"] .dot {
+    background-color: var(--accent-success);
 }
 
-.timeline .content .subtitle {
+.timeline li[data-status="active"] .dot {
+    background-color: var(--accent);
+    transform: scale(1.2);
+}
+
+.timeline .title {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-main);
+}
+
+.timeline .subtitle {
     font-size: 0.8rem;
     color: var(--text-muted);
-}
-
-/* Estados en la timeline (se actualizan por clases desde JS) */
-.timeline li.completed .dot {
-    background: var(--accent-success);
-    border-color: rgba(46, 204, 113, 0.9);
-}
-
-.timeline li.active .dot {
-    background: var(--accent);
-    border-color: rgba(79, 156, 255, 0.9);
-}
-
-.timeline li.completed .title {
-    color: #c2f3d7;
-}
-
-.timeline li.active .title {
-    color: #d6e5ff;
-}
-
-.timeline li.pending .title {
-    color: var(--text-muted);
-}
-
-/* Utilidades */
-.text-secondary {
-    color: var(--text-muted) !important;
-}
-
-.object-fit-cover {
-    object-fit: cover;
-}
-
-/* Responsive pequeños toques */
-@media (max-width: 767.98px) {
-    .pipeline-progress {
-        width: 100%;
-        margin-top: 0.75rem;
-    }
-
-    .hero-card {
-        padding: 1.5rem;
-    }
 }
