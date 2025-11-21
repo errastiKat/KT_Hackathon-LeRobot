@@ -1,113 +1,109 @@
-// static/js/main.js
-
 document.addEventListener("DOMContentLoaded", () => {
+    console.log("🚀 LeRobot Frontend cargado");
+
+    // --- ELEMENTOS DEL DOM ---
     const recordBtn = document.getElementById("record-btn");
     const audioStatusPill = document.getElementById("audio-status-pill");
     const recordHint = document.getElementById("record-hint");
     const recordingVisual = document.querySelector(".recording-visual");
     const sttText = document.getElementById("stt-text");
+    
+    // Elementos de la barra de progreso (Pipeline)
     const pipelineProgressBar = document.getElementById("pipeline-progress-bar");
     const pipelineTimeline = document.getElementById("pipeline-timeline");
 
-    let isRecording = false;
-    let mediaRecorder = null;
-    let audioChunks = [];
+    // ==================================================
+    // 1. LÓGICA DEL BOTÓN (ACTIVAR ESCUCHA DEL ROBOT)
+    // ==================================================
+    if (recordBtn) {
+        recordBtn.addEventListener("click", async () => {
+            
+            // Evitar pulsar dos veces si ya está escuchando
+            if (recordBtn.classList.contains("recording")) return;
 
-    // ==========
-    // Grabación
-    // ==========
-    recordBtn.addEventListener("click", async () => {
-        if (!isRecording) {
-            // Empezar grabación
-            isRecording = true;
+            // --- A. CAMBIAR UI A MODO "ESCUCHANDO" ---
+            console.log("🎤 Enviando orden de escuchar al robot...");
+            
+            // Activar animaciones CSS
             recordBtn.classList.add("recording");
-            recordingVisual.classList.add("recording");
-            audioStatusPill.textContent = "Grabando…";
-            audioStatusPill.className = "status-pill status-active";
-            recordHint.textContent = "Pulsa de nuevo para parar y enviar";
+            if (recordingVisual) recordingVisual.classList.add("recording");
+            
+            // Actualizar textos y etiquetas
+            audioStatusPill.textContent = "Robot escuchando...";
+            audioStatusPill.className = "status-pill status-active"; // Verde/Activo
+            recordHint.textContent = "Habla alto y claro al micrófono del robot";
+            sttText.innerHTML = '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
 
-            // Si no quieres usar MediaRecorder todavía, comenta todo el bloque try/catch:
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream);
-                audioChunks = [];
-
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        audioChunks.push(event.data);
+                // --- B. LLAMADA AL BACKEND (TRIGGER) ---
+                // Esto le dice a Python: "Ejecuta voice_engine.escuchar_y_obtener_prompt()"
+                const response = await fetch("/api/listen-command", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
                     }
-                };
+                });
 
-                mediaRecorder.onstop = async () => {
-                    const blob = new Blob(audioChunks, { type: "audio/webm" });
-                    await sendAudioToBackend(blob);
-                    stream.getTracks().forEach(t => t.stop());
-                };
+                const data = await response.json();
 
-                mediaRecorder.start();
+                // --- C. RESPUESTA RECIBIDA (FIN DE ESCUCHA) ---
+                // Desactivar animaciones
+                recordBtn.classList.remove("recording");
+                if (recordingVisual) recordingVisual.classList.remove("recording");
+
+                if (data.ok) {
+                    // ÉXITO: El robot entendió y generó el prompt
+                    console.log("✅ Prompt recibido:", data.transcript);
+                    
+                    audioStatusPill.textContent = "Completado";
+                    audioStatusPill.className = "status-pill status-done"; 
+                    recordHint.textContent = "Pulsa para grabar otra vez";
+                    
+                    // Mostrar el prompt en inglés en la caja
+                    sttText.innerText = data.transcript;
+                    
+                    // Actualizar visualmente el paso en la timeline
+                    markStageAsDone('speech');
+
+                } else {
+                    // ERROR LÓGICO: El robot escuchó pero no entendió o se canceló
+                    console.warn("⚠️", data.message);
+                    audioStatusPill.textContent = "No entendido";
+                    audioStatusPill.className = "status-pill status-pending"; // Naranja
+                    recordHint.textContent = "Inténtalo de nuevo";
+                    sttText.innerHTML = `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
+                }
+
             } catch (err) {
-                console.error("Error al acceder al micrófono:", err);
+                // --- D. ERROR DE RED/SERVIDOR ---
+                console.error("❌ Error de conexión:", err);
+                
+                recordBtn.classList.remove("recording");
+                if (recordingVisual) recordingVisual.classList.remove("recording");
+                
+                audioStatusPill.textContent = "Error de Conexión";
+                audioStatusPill.className = "status-pill status-pending";
+                sttText.innerText = "Error: El servidor Python no responde o el micrófono falló.";
             }
-        } else {
-            // Parar grabación
-            isRecording = false;
-            recordBtn.classList.remove("recording");
-            recordingVisual.classList.remove("recording");
-            audioStatusPill.textContent = "Procesando audio…";
-            audioStatusPill.className = "status-pill status-pending";
-            recordHint.textContent = "Esperando respuesta del backend…";
-
-            if (mediaRecorder && mediaRecorder.state !== "inactive") {
-                mediaRecorder.stop();
-            } else {
-                // Si no activas MediaRecorder, al menos simula una llamada:
-                sendAudioToBackend(null);
-            }
-        }
-    });
-
-    async function sendAudioToBackend(blob) {
-        try {
-            const formData = new FormData();
-            if (blob) {
-                formData.append("audio", blob, "audio.webm");
-            }
-
-            const response = await fetch("/api/upload-audio", {
-                method: "POST",
-                body: formData
-            });
-
-            const data = await response.json();
-
-            if (data.ok) {
-                audioStatusPill.textContent = "Audio enviado";
-                audioStatusPill.className = "status-pill status-done";
-                sttText.innerHTML = data.transcript || "Transcripción recibida (aquí colocarás el texto STT).";
-            } else {
-                audioStatusPill.textContent = "Error en el backend";
-                audioStatusPill.className = "status-pill status-idle";
-            }
-        } catch (err) {
-            console.error("Error al enviar audio:", err);
-            audioStatusPill.textContent = "Error de red";
-            audioStatusPill.className = "status-pill status-idle";
-        }
+        });
     }
 
-    // ==========================
-    // Estado del pipeline (UI)
-    // ==========================
-
+    // ==================================================
+    // 2. ESTADO DEL PIPELINE (Polling cada 2s)
+    // ==================================================
     async function refreshPipelineStatus() {
         try {
             const res = await fetch("/api/status");
             const data = await res.json();
 
+            // Actualizar barra superior
             const percent = data.progress_percent || 0;
-            pipelineProgressBar.style.width = `${percent}%`;
-            pipelineProgressBar.setAttribute("aria-valuenow", percent);
+            if (pipelineProgressBar) {
+                pipelineProgressBar.style.width = `${percent}%`;
+                pipelineProgressBar.setAttribute("aria-valuenow", percent);
+            }
 
+            // Actualizar lista lateral (Timeline)
             if (!pipelineTimeline) return;
 
             const stageMap = {};
@@ -116,22 +112,25 @@ document.addEventListener("DOMContentLoaded", () => {
             pipelineTimeline.querySelectorAll("li").forEach(li => {
                 const stageId = li.getAttribute("data-stage");
                 const status = stageMap[stageId] || "pending";
-                li.classList.remove("completed", "active", "pending");
-
-                if (status === "done") {
-                    li.classList.add("completed");
-                } else if (status === "in_progress") {
-                    li.classList.add("active");
-                } else {
-                    li.classList.add("pending");
-                }
+                
+                // Resetear clases
+                li.classList.remove("done", "active", "pending"); // Ajusta según tu CSS
+                li.setAttribute("data-status", status); // Para que el CSS nuevo funcione
             });
+
         } catch (err) {
-            console.error("Error al obtener estado del pipeline:", err);
+            console.error("Error polling status:", err);
         }
     }
 
-    // Actualizar cada 2s (puedes cambiar esta frecuencia)
+    // Función auxiliar para forzar visualmente un paso completado (Feedback inmediato)
+    function markStageAsDone(stageId) {
+        if (!pipelineTimeline) return;
+        const li = pipelineTimeline.querySelector(`li[data-stage="${stageId}"]`);
+        if (li) li.setAttribute("data-status", "done");
+    }
+
+    // Iniciar el bucle de estado
     setInterval(refreshPipelineStatus, 2000);
     refreshPipelineStatus();
 });

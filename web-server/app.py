@@ -1,84 +1,90 @@
-from flask import Flask, render_template, jsonify, request, url_for
+import os
+import sys
+from flask import Flask, render_template, jsonify, url_for
 from flask_cors import CORS
+
+# --- 1. IMPORTACIÓN LIMPIA DEL MÓDULO SUPERIOR ---
+# Añadimos la carpeta de arriba ("..") a las rutas de Python para poder importar
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, ".."))
+sys.path.append(project_root)
+
+# Ahora importamos tu clase directamente. Sin reescribir nada.
+from voice_module import VoiceEngine
 
 app = Flask(__name__)
 CORS(app)
 
+# --- 2. INICIALIZAR TU MOTOR ---
+# Definimos la ruta al modelo relativa a la raíz del proyecto
+MODEL_PATH = os.path.join(project_root, "vosk-model-small-es-0.42")
+
+print(f"⚙️ Inicializando VoiceEngine desde: {MODEL_PATH}")
+# Instanciamos tu clase. Ella se encarga de cargar Vosk, el traductor, etc.
+motor_voz = VoiceEngine(MODEL_PATH)
+
+
 # =========================
-#   RUTAS PRINCIPALES
+#   RUTAS WEB
 # =========================
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+# --- ENDPOINT CLAVE: USA TU SCRIPT ---
+@app.route("/api/listen-command", methods=["POST"])
+def listen_command():
+    print("🎤 Web pide activar escucha...")
+    
+    try:
+        # USAMOS TU MÉTODO DIRECTAMENTE
+        # Esto bloqueará la ejecución hasta que tu script 'voice_module.py'
+        # detecte la frase, la valide como navideña, la traduzca y devuelva el prompt.
+        prompt = motor_voz.escuchar_y_obtener_prompt()
+        
+        if prompt:
+            return jsonify({
+                "ok": True,
+                "transcript": prompt  # Devolvemos exactamente lo que generó tu script
+            })
+        else:
+            return jsonify({
+                "ok": False,
+                "message": "No se detectó comando o se canceló."
+            }), 400
+
+    except Exception as e:
+        print(f"❌ Error en el motor de voz: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # =========================
-#   ENDPOINTS DE LA API
+#   OTROS ENDPOINTS (ESTADO, IMAGENES...)
 # =========================
 
 @app.route("/api/status")
 def api_status():
-    """
-    Devuelve el estado del pipeline.
-    """
-    demo_status = {
-        "progress_percent": 40,
-        "current_stage": "ia_edit",
-        "stages": [
-            {"id": "face_detect", "label": "Detección de rostro", "status": "done"},
-            {"id": "face_capture", "label": "Captura de foto", "status": "done"},
-            {"id": "speech", "label": "Frase grabada", "status": "in_progress"},
-            {"id": "ia_edit", "label": "Edición IA", "status": "pending"},
-            {"id": "contours", "label": "Extracción de contornos", "status": "pending"},
-            {"id": "robot_draw", "label": "Dibujo en LeRobot", "status": "pending"},
-        ]
-    }
-    return jsonify(demo_status)
-
-@app.route("/api/upload-audio", methods=["POST"])
-def upload_audio():
-    """
-    Endpoint para recibir el audio.
-    """
+    # Demo status
     return jsonify({
-        "ok": True,
-        "message": "Audio recibido. Procesando STT + IA...",
-        "transcript": "ponme un gorro de navidad rojo, grande"
+        "progress_percent": 0,
+        "current_stage": "idle",
+        "stages": [] # Puedes rellenar esto si quieres mostrar el timeline
     })
 
 @app.route("/api/ia-image-url")
 def ia_image_url():
-    """
-    Devuelve la URL de la imagen editada.
-    """
-    return jsonify({
-        "url": url_for("static", filename="img/ia_placeholder.jpg")
-    })
-
-# =========================
-#   ENDPOINTS DE VIDEO (Placeholder)
-#   Estos son los que te daban el error BuildError
-# =========================
+    return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
 
 @app.route("/face_stream")
 def face_stream():
-    """
-    Ruta futura para el stream de vídeo MJPEG.
-    Por ahora devuelve una imagen estática o un error 404 controlado 
-    para que la app no se rompa.
-    """
-    # Cuando tengas la cámara, aquí iría el 'yield (b--frame...)'
     return url_for('static', filename='img/face_placeholder.jpg')
 
 @app.route("/robot_stream")
 def robot_stream():
-    """
-    Ruta futura para el stream del robot.
-    """
     return url_for('static', filename='img/robot_placeholder.jpg')
 
 
 if __name__ == "__main__":
-    # 3. CAMBIO IMPORTANTE: host="0.0.0.0"
-    # Esto le dice a Flask: "Escucha en la red, no solo en mi PC"
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # use_reloader=False es vital para no cargar el modelo Vosk dos veces
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
