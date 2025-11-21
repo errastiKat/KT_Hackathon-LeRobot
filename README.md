@@ -1,1 +1,1 @@
-# Proyecto de reconocimiento facial
+# Proyecto LeRobot - KT Team
