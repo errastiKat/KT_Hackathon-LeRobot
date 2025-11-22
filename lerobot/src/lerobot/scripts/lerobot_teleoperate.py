@@ -50,7 +50,8 @@ lerobot-teleoperate \
 ```
 
 """
-
+import sys
+sys.path.append("/home/ignacio/KT_Hackathon-LeRobot/lerobot/src")
 import logging
 import time
 from dataclasses import asdict, dataclass
@@ -60,7 +61,7 @@ import rerun as rr
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
-from lerobot.configs import parser
+from lerobot.configs import parser      
 from lerobot.processor import (
     RobotAction,
     RobotObservation,

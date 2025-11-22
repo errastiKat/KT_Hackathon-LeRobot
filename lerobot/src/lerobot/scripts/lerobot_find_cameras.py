@@ -1,3 +1,5 @@
+import sys
+sys.path.append("/home/ignacio/KT_Hackathon-LeRobot/lerobot/src")
 #!/usr/bin/env python
 
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.

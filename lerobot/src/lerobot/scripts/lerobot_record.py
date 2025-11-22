@@ -1,3 +1,5 @@
+import sys
+sys.path.append("/home/ignacio/KT_Hackathon-LeRobot/lerobot/src")
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
