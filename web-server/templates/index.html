@@ -8,21 +8,15 @@
             <div class="hero-text">
                 <h1 class="h3 fw-semibold mb-2">De una sonrisa a un dibujo en papel</h1>
                 <p class="text-secondary mb-0">
-                    1) La cámara detecta tu cara y espera a que sonrías.<br>
-                    2) Grabas una frase por voz para describir el objeto.<br>
-                    3) La IA edita la imagen y LeRobot la dibuja en papel.
+                    1. Activa la cámara del móvil y sonríe.<br>
+                    2. Habla al PC para pedir qué dibujar.<br>
+                    3. La IA transforma tu foto y el robot la dibuja.
                 </p>
             </div>
             <div class="hero-progress mt-3 mt-md-0">
-                <div class="small text-secondary mb-1 text-end">
-                    Estado del pipeline
-                </div>
+                <div class="small text-secondary mb-1 text-end">Estado del pipeline</div>
                 <div class="progress pipeline-progress">
-                    <div class="progress-bar" id="pipeline-progress-bar"
-                         role="progressbar"
-                         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-                         style="width: 0%;">
-                    </div>
+                    <div class="progress-bar" id="pipeline-progress-bar" role="progressbar" style="width: 0%;"></div>
                 </div>
             </div>
         </div>
@@ -35,25 +29,36 @@
             <div class="card-header d-flex justify-content-between align-items-center border-0">
                 <div>
                     <span class="badge bg-primary-soft me-2">
-                        <i class="bi bi-camera-video me-1"></i>Reconocimiento facial
+                        <i class="bi bi-camera-video me-1"></i>Cámara Móvil
                     </span>
-                    <span class="text-secondary small">Esperando sonrisa...</span>
+                    <span class="text-secondary small">Requiere HTTPS</span>
                 </div>
-                <span class="status-pill status-idle" id="face-status-pill">
-                    Esperando rostro
-                </span>
+                <span class="status-pill status-idle" id="face-status-pill">Esperando...</span>
             </div>
             <div class="card-body">
-                <div class="video-frame mb-2">
-                    <img id="face-image"
-                        src="{{ url_for('static', filename='img/face_placeholder.jpg') }}"
-                        class="w-100 h-100 object-fit-cover"
-                        alt="Stream de reconocimiento facial">
+                
+                <div class="video-container position-relative rounded overflow-hidden bg-black mb-2" style="aspect-ratio: 4/3;">
+                    
+                    <video id="local-video" autoplay playsinline muted 
+                           style="width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: none;">
+                    </video>
+                    
+                    <div id="start-cam-overlay" class="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center bg-dark bg-opacity-75">
+                        <button id="btn-start-cam" class="btn btn-primary btn-lg shadow-lg">
+                            <i class="bi bi-camera-fill me-2"></i> Activar Cámara
+                        </button>
+                    </div>
+
+                    <canvas id="capture-canvas" style="display: none;"></canvas>
+
+                    <img id="final-capture-img" src="" class="position-absolute top-0 start-0 w-100 h-100 object-fit-cover d-none">
                 </div>
 
                 <div class="d-flex justify-content-between align-items-center small text-secondary">
-                    <span><i class="bi bi-bounding-box-circles me-1"></i>Encuadre en tiempo real</span>
-                    <span><i class="bi bi-emoji-smile me-1"></i>Sonríe para capturar</span>
+                    <span id="smile-debug-text"><i class="bi bi-info-circle me-1"></i>Pulsa Activar para empezar</span>
+                    <button class="btn btn-sm btn-outline-danger" onclick="window.resetPipeline()">
+                        <i class="bi bi-trash"></i> Resetear
+                    </button>
                 </div>
             </div>
         </div>
@@ -64,13 +69,10 @@
             <div class="card-header border-0 d-flex justify-content-between align-items-center">
                 <div>
                     <span class="badge bg-success-soft me-2">
-                        <i class="bi bi-mic-fill me-1"></i>Grabador de frase
+                        <i class="bi bi-mic-fill me-1"></i>Voz (Servidor)
                     </span>
-                    <span class="text-secondary small">Solo grabar y enviar</span>
                 </div>
-                <span class="status-pill status-idle" id="audio-status-pill">
-                    Listo
-                </span>
+                <span class="status-pill status-idle" id="audio-status-pill">Listo</span>
             </div>
             <div class="card-body d-flex flex-column">
                 <div class="d-flex flex-column align-items-center mb-3">
@@ -78,22 +80,11 @@
                         <i class="bi bi-mic-fill"></i>
                     </button>
                     <div class="small text-secondary mt-2 text-center" id="record-hint">
-                        Pulsa para grabar
+                        Pulsa y habla al PC
                     </div>
                 </div>
-
-                <div class="recording-visual mb-3">
-                    <div class="recording-bar"></div>
-                    <div class="recording-bar"></div>
-                    <div class="recording-bar"></div>
-                    <div class="recording-bar"></div>
-                    <div class="recording-bar"></div>
-                </div>
-
                 <div class="flex-grow-1">
-                    <label class="form-label small text-secondary mb-1">
-                        Transcripción
-                    </label>
+                    <label class="form-label small text-secondary mb-1">Prompt enviado</label>
                     <div class="stt-box" id="stt-text">
                         <span class="placeholder-text">La frase aparecerá aquí...</span>
                     </div>
@@ -107,67 +98,23 @@
     <div class="col-lg-7">
         <div class="card glass-card h-100">
             <div class="card-header border-0 d-flex justify-content-between align-items-center">
-                <div>
-                    <span class="badge bg-info-soft me-2">
-                        <i class="bi bi-stars me-1"></i>Resultado IA
-                    </span>
-                    <span class="text-secondary small">Imagen procesada</span>
-                </div>
-                <span class="status-pill status-pending" id="ia-status-pill">
-                    Pendiente
-                </span>
+                <span class="badge bg-info-soft me-2">Resultado IA</span>
+                <span class="status-pill status-pending" id="ia-status-pill">Pendiente</span>
             </div>
             <div class="card-body row g-3">
                 <div class="col-md-6">
                     <div class="video-frame mb-2">
-                        <img src="{{ url_for('static', filename='img/ia_placeholder.jpg') }}"
-                             id="ia-image"
-                             class="w-100 h-100 object-fit-cover"
-                             alt="Resultado IA">
-                    </div>
-                    <div class="small text-secondary">
-                        Input para el robot.
+                        <img src="{{ url_for('static', filename='img/ia_placeholder.jpg') }}" 
+                             id="ia-image" class="w-100 h-100 object-fit-cover rounded">
                     </div>
                 </div>
                 <div class="col-md-6">
-                    <h6 class="small text-uppercase text-secondary mb-2">Pipeline</h6>
+                    <h6 class="small text-uppercase text-secondary mb-2">Pasos</h6>
                     <ul class="timeline small" id="pipeline-timeline">
-                        <li data-stage="face_detect">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">Detección</div>
-                            </div>
-                        </li>
-                        <li data-stage="face_capture">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">Captura</div>
-                            </div>
-                        </li>
-                        <li data-stage="speech">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">Audio/STT</div>
-                            </div>
-                        </li>
-                        <li data-stage="ia_edit">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">IA Generativa</div>
-                            </div>
-                        </li>
-                        <li data-stage="contours">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">Contornos</div>
-                            </div>
-                        </li>
-                        <li data-stage="robot_draw">
-                            <span class="dot"></span>
-                            <div class="content">
-                                <div class="title">Robot</div>
-                            </div>
-                        </li>
+                        <li data-stage="face_detect"><span class="dot"></span> Detección</li>
+                        <li data-stage="face_capture"><span class="dot"></span> Captura</li>
+                        <li data-stage="speech"><span class="dot"></span> Voz</li>
+                        <li data-stage="ia_edit"><span class="dot"></span> Generar IA</li>
                     </ul>
                 </div>
             </div>
@@ -176,26 +123,11 @@
 
     <div class="col-lg-5">
         <div class="card glass-card h-100">
-            <div class="card-header border-0 d-flex justify-content-between align-items-center">
-                <div>
-                    <span class="badge bg-warning-soft me-2">
-                        <i class="bi bi-vector-pen me-1"></i>Cam Robot
-                    </span>
-                    <span class="text-secondary small">En vivo</span>
-                </div>
-                <span class="status-pill status-idle" id="robot-status-pill">
-                    Espera
-                </span>
+            <div class="card-header border-0">
+                <span class="badge bg-warning-soft"><i class="bi bi-robot me-1"></i>Robot View</span>
             </div>
             <div class="card-body">
-                <div class="video-frame mb-2">
-                    <img src="{{ url_for('static', filename='img/robot_placeholder.jpg') }}"
-                         class="w-100 h-100 object-fit-cover"
-                         alt="Stream Robot">
-                </div>
-                <div class="small text-secondary d-flex justify-content-between">
-                    <span><i class="bi bi-eye me-1"></i>Visualización</span>
-                </div>
+                <img src="{{ url_for('static', filename='img/robot_placeholder.jpg') }}" class="w-100 rounded">
             </div>
         </div>
     </div>

@@ -129,69 +129,80 @@ class VoiceEngine:
             print(f"\n[ERROR] {e}")
             return Noneimport os
 import sys
-from flask import Flask, render_template, jsonify, url_for, Response
+import json
+from flask import Flask, render_template, jsonify, url_for, Response, request
 from flask_cors import CORS
 
+from google import genai
+from PIL import Image
+import io
+
 # --- 1. IMPORTACIÓN LIMPIA DEL MÓDULO SUPERIOR ---
-# Añadimos la carpeta de arriba ("..") a las rutas de Python para poder importar
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(project_root)
 
-# Ahora importamos tu clase directamente. Sin reescribir nada.
 from voice_module import VoiceEngine
-from reconcoimiento_facial.recognize_smile import SmileDetector
+from reconcoimiento_facial.smile_detector import SmileDetector
 
 
 app = Flask(__name__)
 CORS(app)
 
-# --- 2. INICIALIZAR TU MOTOR ---
-# Definimos la ruta al modelo relativa a la raíz del proyecto
+# =========================
+#   VOICE ENGINE (VOSK)
+# =========================
+
 MODEL_PATH = os.path.join(project_root, "vosk-model-small-es-0.42")
 
 print(f"⚙️ Inicializando VoiceEngine desde: {MODEL_PATH}")
-# Instanciamos tu clase. Ella se encarga de cargar Vosk, el traductor, etc.
 motor_voz = VoiceEngine(MODEL_PATH)
-
 
 # =========================
 #   ESTADO DEL PIPELINE
 # =========================
 
-# Flags muy simples por ahora
 pipeline_flags = {
-    "speech_done": False,   # lo marcaremos a True cuando /api/listen-command tenga éxito
+    "speech_done": False,      # /api/listen-command OK
+    "last_prompt": None,       # prompt final en inglés
+    "ia_in_progress": False,   # IA generativa en marcha
+    "ia_done": False,          # IA generativa terminada
 }
-
 
 # =========================
 #   SMILE DETECTOR
 # =========================
 
-# Ruta absoluta al static de Flask
 STATIC_DIR = os.path.join(current_dir, "static")
 
-# Vamos a guardar la foto en static/img/smile_capture.jpg
+# Foto de la cara (entrada a la IA)
 CAPTURE_REL = os.path.join("img", "smile_capture.jpg")
 CAPTURE_PATH = os.path.join(STATIC_DIR, CAPTURE_REL)
-
 os.makedirs(os.path.dirname(CAPTURE_PATH), exist_ok=True)
 
 print(f"📸 Inicializando SmileDetector. Foto irá a: {CAPTURE_PATH}")
 smile_detector = SmileDetector(
     cam_index=0,
-    frame_w=1280,          # antes 1920
-    frame_h=720,           # antes 1080
+    frame_w=1280,
+    frame_h=720,
     happy_threshold=60.0,
     min_smile_frames=5,
-    process_every_n=6,     # antes 2 -> analiza 1 de cada 6 frames
-    detector_backend="opencv",  # más ligero que 'retinaface'
+    process_every_n=6,
+    detector_backend="opencv",
     capture_path=CAPTURE_PATH,
 )
 smile_detector.start()
 
+# =========================
+#   CONFIG IA (GEMINI)
+# =========================
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL_NAME = "gemini-2.5-flash-image"
+
+# Imagen salida IA
+IA_OUTPUT_REL = os.path.join("img", "ia_result.png")
+IA_OUTPUT_PATH = os.path.join(STATIC_DIR, IA_OUTPUT_REL)
 
 
 # =========================
@@ -203,6 +214,9 @@ def index():
     return render_template("index.html")
 
 
+# -------------------------
+#   VOZ → PROMPT
+# -------------------------
 @app.route("/api/listen-command", methods=["POST"])
 def listen_command():
     print("🎤 Web pide activar escucha...")
@@ -213,6 +227,12 @@ def listen_command():
         if prompt:
             # ✅ Marcamos que la fase de voz/STT ha terminado correctamente
             pipeline_flags["speech_done"] = True
+            pipeline_flags["last_prompt"] = prompt
+
+            # Cuando hay prompt nuevo, reseteamos la IA generativa
+            pipeline_flags["ia_done"] = False
+            pipeline_flags["ia_in_progress"] = False
+            # (opcional: podrías borrar la imagen anterior ia_result.png)
 
             return jsonify({
                 "ok": True,
@@ -229,10 +249,9 @@ def listen_command():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# =========================
-#   OTROS ENDPOINTS (ESTADO, IMAGENES...)
-# =========================
-
+# -------------------------
+#   ESTADO GLOBAL PIPELINE
+# -------------------------
 @app.route("/api/status")
 def api_status():
     """
@@ -242,15 +261,11 @@ def api_status():
       - stages: lista con id y status ('pending' | 'active' | 'done')
     """
 
-    # --- 1) Estado de la cara / sonrisa ---
+    # 1) Cara / sonrisa / captura
     smile_state = smile_detector.get_state()
     face_present = smile_state.get("face_present", False)
     photo_taken = smile_state.get("photo_taken", False)
 
-    # Lógica sencilla:
-    # - Sin cara: face_detect = active, face_capture = pending
-    # - Cara pero sin foto: face_detect = done, face_capture = active
-    # - Foto hecha: face_detect = done, face_capture = done
     if photo_taken:
         face_detect_status = "done"
         face_capture_status = "done"
@@ -261,12 +276,26 @@ def api_status():
         face_detect_status = "active"
         face_capture_status = "pending"
 
-    # --- 2) Estado de voz ---
+    # 2) Voz
     speech_done = pipeline_flags.get("speech_done", False)
     speech_status = "done" if speech_done else "pending"
 
-    # Más adelante podrás cambiar estos cuando añadas IA, contornos, robot...
-    ia_edit_status = "pending"
+    # 3) IA generativa
+    ia_done = pipeline_flags.get("ia_done", False)
+    ia_in_progress = pipeline_flags.get("ia_in_progress", False)
+
+    if ia_done:
+        ia_edit_status = "done"
+    elif ia_in_progress:
+        ia_edit_status = "active"
+    else:
+        # Solo tiene sentido activar IA cuando cara y voz están listas
+        if photo_taken and speech_done:
+            ia_edit_status = "active"  # el frontend puede usar esto para mostrar "listo para IA"
+        else:
+            ia_edit_status = "pending"
+
+    # 4) Contornos / robot (por ahora pendientes)
     contours_status = "pending"
     robot_draw_status = "pending"
 
@@ -279,12 +308,10 @@ def api_status():
         {"id": "robot_draw",   "status": robot_draw_status},
     ]
 
-    # --- 3) Progreso global (porcentaje) ---
     done_count = sum(1 for s in stages if s["status"] == "done")
     total = len(stages)
     progress_percent = int(100 * done_count / total) if total > 0 else 0
 
-    # --- 4) Etapa actual (primera que no está 'done') ---
     current_stage = "idle"
     for s in stages:
         if s["status"] != "done":
@@ -297,48 +324,163 @@ def api_status():
         "stages": stages
     })
 
+
+# -------------------------
+#   IA: LANZAR PROCESO
+# -------------------------
+@app.route("/api/run-ia", methods=["POST"])
+def api_run_ia():
+    """
+    Lanza el procesado IA:
+      - Usa la foto de SmileDetector (smile_capture.jpg)
+      - Usa el último prompt de VoiceEngine
+      - Llama al modelo Gemini y guarda ia_result.png
+    """
+    if GEMINI_API_KEY is None:
+        return jsonify({
+            "ok": False,
+            "error": "GEMINI_API_KEY no está definida en el entorno"
+        }), 500
+
+    # Comprobamos que haya foto
+    smile_state = smile_detector.get_state()
+    if not smile_state.get("photo_taken", False):
+        return jsonify({
+            "ok": False,
+            "error": "Todavía no hay foto capturada."
+        }), 400
+
+    # Comprobamos que haya prompt
+    prompt = pipeline_flags.get("last_prompt")
+    if not prompt:
+        return jsonify({
+            "ok": False,
+            "error": "Todavía no hay prompt de voz válido."
+        }), 400
+
+    # Evitar dobles ejecuciones simultáneas
+    if pipeline_flags.get("ia_in_progress", False):
+        return jsonify({
+            "ok": False,
+            "error": "La IA ya está procesando."
+        }), 409
+
+    print("✨ Lanzando IA generativa con Gemini...")
+    pipeline_flags["ia_in_progress"] = True
+
+    try:
+        # 1) Cliente
+        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        # 2) Cargar la imagen capturada
+        if not os.path.exists(CAPTURE_PATH):
+            pipeline_flags["ia_in_progress"] = False
+            return jsonify({
+                "ok": False,
+                "error": f"No se encuentra la imagen de entrada en {CAPTURE_PATH}"
+            }), 500
+
+        img = Image.open(CAPTURE_PATH)
+
+        # 3) Llamada al modelo
+        response = client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents=[prompt, img]
+        )
+
+        # 4) Buscar imagen en la respuesta
+        image_found = False
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if getattr(part, "inline_data", None):
+                    try:
+                        image_bytes = part.inline_data.data
+                        image_output = Image.open(io.BytesIO(image_bytes))
+                        os.makedirs(os.path.dirname(IA_OUTPUT_PATH), exist_ok=True)
+                        image_output.save(IA_OUTPUT_PATH)
+                        image_found = True
+                        print(f"🎉 IA: imagen guardada en {IA_OUTPUT_PATH}")
+                        break
+                    except Exception as e:
+                        print(f"⚠️ Error guardando la imagen devuelta por la IA: {e}")
+
+                if getattr(part, "text", None):
+                    print(f"📝 Respuesta IA (texto): {part.text}")
+
+        if not image_found:
+            pipeline_flags["ia_in_progress"] = False
+            return jsonify({
+                "ok": False,
+                "error": "La IA no devolvió ninguna imagen nueva."
+            }), 500
+
+        # Éxito
+        pipeline_flags["ia_in_progress"] = False
+        pipeline_flags["ia_done"] = True
+
+        return jsonify({
+            "ok": True,
+            "url": url_for("static", filename=IA_OUTPUT_REL)
+        })
+
+    except Exception as e:
+        pipeline_flags["ia_in_progress"] = False
+        print(f"❌ Error crítico en IA: {e}")
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+# -------------------------
+#   IA: URL DE LA IMAGEN
+# -------------------------
 @app.route("/api/ia-image-url")
 def ia_image_url():
-    return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
+    """
+    Devuelve la URL de la imagen IA:
+      - Si hay resultado: ia_result.png
+      - Si no, el placeholder original.
+    """
+    if pipeline_flags.get("ia_done", False) and os.path.exists(IA_OUTPUT_PATH):
+        return jsonify({"url": url_for("static", filename=IA_OUTPUT_REL)})
+    else:
+        return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
 
 
+# -------------------------
+#   ROBOT CAM (placeholder)
+# -------------------------
 @app.route("/robot_stream")
 def robot_stream():
     return url_for('static', filename='img/robot_placeholder.jpg')
 
 
+# -------------------------
+#   FACE: FRAME + ESTADO
+# -------------------------
 @app.route("/api/face-frame")
 def api_face_frame():
-    """
-    Devuelve el último frame de la cámara (con textos/caja) como JPEG.
-    El frontend lo usará en el <img> de "Reconocimiento facial".
-    """
     jpeg = smile_detector.get_frame_jpeg()
     if jpeg is None:
-        # Si aún no hay frame, devolvemos el placeholder estático
         return app.send_static_file("img/face_placeholder.jpg")
     return Response(jpeg, mimetype="image/jpeg")
 
 
 @app.route("/api/face-status")
 def api_face_status():
-    """
-    Devuelve estado del detector de sonrisas:
-    {
-      happy, happy_threshold, face_present, photo_taken, capture_path, ...
-    }
-    """
     return jsonify(smile_detector.get_state())
+
 
 @app.route("/face_stream")
 def face_stream():
-    # Por compatibilidad, devolvemos la URL del endpoint de frame
     return url_for("api_face_frame")
 
 
 if __name__ == "__main__":
     # use_reloader=False es vital para no cargar el modelo Vosk dos veces
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)document.addEventListener("DOMContentLoaded", () => {
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+document.addEventListener("DOMContentLoaded", () => {
     console.log("🚀 LeRobot Frontend cargado");
 
     // --- ELEMENTOS DEL DOM ---
@@ -348,45 +490,47 @@ if __name__ == "__main__":
     const recordingVisual = document.querySelector(".recording-visual");
     const sttText = document.getElementById("stt-text");
 
-    // Elementos del módulo de cara
+    // Módulo de cara
     const faceStatusPill = document.getElementById("face-status-pill");
     const faceImage = document.getElementById("face-image");
 
-    // Elementos de la barra de progreso (Pipeline)
+    // Módulo IA
+    const iaStatusPill = document.getElementById("ia-status-pill");
+    const iaImage = document.getElementById("ia-image");
+
+    // Pipeline
     const pipelineProgressBar = document.getElementById("pipeline-progress-bar");
     const pipelineTimeline = document.getElementById("pipeline-timeline");
 
+    // Flag local para no spamear /api/run-ia
+    let iaRequested = false;
+
     // ==================================================
-    // 1. LÓGICA DEL BOTÓN (ACTIVAR ESCUCHA DEL ROBOT)
+    // 1. LÓGICA DEL BOTÓN (ACTIVAR ESCUCHA)
     // ==================================================
     if (recordBtn) {
         recordBtn.addEventListener("click", async () => {
 
-            // Evitar pulsar dos veces si ya está escuchando
             if (recordBtn.classList.contains("recording")) return;
 
-            // --- A. CAMBIAR UI A MODO "ESCUCHANDO" ---
             console.log("🎤 Enviando orden de escuchar al robot...");
 
-            // Activar animaciones CSS
             recordBtn.classList.add("recording");
             if (recordingVisual) recordingVisual.classList.add("recording");
 
-            // Actualizar textos y etiquetas
             if (audioStatusPill) {
                 audioStatusPill.textContent = "Robot escuchando...";
-                audioStatusPill.className = "status-pill status-active"; // Verde/Activo
+                audioStatusPill.className = "status-pill status-active";
             }
             if (recordHint) {
                 recordHint.textContent = "Habla alto y claro al micrófono del robot";
             }
             if (sttText) {
-                sttText.innerHTML = '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
+                sttText.innerHTML =
+                    '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
             }
 
             try {
-                // --- B. LLAMADA AL BACKEND (TRIGGER) ---
-                // Esto le dice a Python: "Ejecuta voice_engine.escuchar_y_obtener_prompt()"
                 const response = await fetch("/api/listen-command", {
                     method: "POST",
                     headers: {
@@ -396,13 +540,10 @@ if __name__ == "__main__":
 
                 const data = await response.json();
 
-                // --- C. RESPUESTA RECIBIDA (FIN DE ESCUCHA) ---
-                // Desactivar animaciones
                 recordBtn.classList.remove("recording");
                 if (recordingVisual) recordingVisual.classList.remove("recording");
 
                 if (data.ok) {
-                    // ÉXITO: El robot entendió y generó el prompt
                     console.log("✅ Prompt recibido:", data.transcript);
 
                     if (audioStatusPill) {
@@ -412,32 +553,30 @@ if __name__ == "__main__":
                     if (recordHint) {
                         recordHint.textContent = "Pulsa para grabar otra vez";
                     }
-
-                    // Mostrar el prompt en inglés en la caja
                     if (sttText) {
                         sttText.innerText = data.transcript;
                     }
 
-                    // Actualizar visualmente el paso en la timeline
                     markStageAsDone("speech");
+                    // Nuevo prompt => permitimos volver a pedir IA
+                    iaRequested = false;
 
                 } else {
-                    // ERROR LÓGICO: El robot escuchó pero no entendió o se canceló
                     console.warn("⚠️", data.message);
                     if (audioStatusPill) {
                         audioStatusPill.textContent = "No entendido";
-                        audioStatusPill.className = "status-pill status-pending"; // Naranja
+                        audioStatusPill.className = "status-pill status-pending";
                     }
                     if (recordHint) {
                         recordHint.textContent = "Inténtalo de nuevo";
                     }
                     if (sttText) {
-                        sttText.innerHTML = `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
+                        sttText.innerHTML =
+                            `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
                     }
                 }
 
             } catch (err) {
-                // --- D. ERROR DE RED/SERVIDOR ---
                 console.error("❌ Error de conexión:", err);
 
                 recordBtn.classList.remove("recording");
@@ -448,7 +587,8 @@ if __name__ == "__main__":
                     audioStatusPill.className = "status-pill status-pending";
                 }
                 if (sttText) {
-                    sttText.innerText = "Error: El servidor Python no responde o el micrófono falló.";
+                    sttText.innerText =
+                        "Error: El servidor Python no responde o el micrófono falló.";
                 }
             }
         });
@@ -462,14 +602,12 @@ if __name__ == "__main__":
             const res = await fetch("/api/status");
             const data = await res.json();
 
-            // Actualizar barra superior
             const percent = data.progress_percent || 0;
             if (pipelineProgressBar) {
                 pipelineProgressBar.style.width = `${percent}%`;
                 pipelineProgressBar.setAttribute("aria-valuenow", percent);
             }
 
-            // Actualizar lista lateral (Timeline)
             if (!pipelineTimeline) return;
 
             const stageMap = {};
@@ -480,18 +618,50 @@ if __name__ == "__main__":
             pipelineTimeline.querySelectorAll("li").forEach(li => {
                 const stageId = li.getAttribute("data-stage");
                 const status = stageMap[stageId] || "pending";
-
-                // Resetear clases si tu CSS las usa, pero principalmente usamos data-status
                 li.classList.remove("done", "active", "pending");
                 li.setAttribute("data-status", status);
             });
+
+            // ---- Actualizar pill de IA en función del estado ----
+            const iaStatus = stageMap["ia_edit"] || "pending";
+            if (iaStatusPill) {
+                if (iaStatus === "done") {
+                    iaStatusPill.textContent = "Completado";
+                    iaStatusPill.className = "status-pill status-done";
+                } else if (iaStatus === "active") {
+                    iaStatusPill.textContent = "Procesando IA...";
+                    iaStatusPill.className = "status-pill status-active";
+                } else {
+                    iaStatusPill.textContent = "Pendiente";
+                    iaStatusPill.className = "status-pill status-pending";
+                }
+            }
+
+            // ---- Lógica para lanzar automáticamente la IA ----
+            const faceCaptureStatus = stageMap["face_capture"];
+            const speechStatus = stageMap["speech"];
+
+            if (
+                faceCaptureStatus === "done" &&
+                speechStatus === "done" &&
+                iaStatus !== "done" &&
+                !iaRequested
+            ) {
+                console.log("🧠 Lanzando IA generativa automáticamente...");
+                iaRequested = true;
+                triggerIAProcess();
+            }
+
+            // Si la IA ya está done, aseguramos que la imagen que se ve es la buena
+            if (iaStatus === "done") {
+                updateIAImage();
+            }
 
         } catch (err) {
             console.error("Error polling status:", err);
         }
     }
 
-    // Función auxiliar para forzar visualmente un paso completado (Feedback inmediato)
     function markStageAsDone(stageId) {
         if (!pipelineTimeline) return;
         const li = pipelineTimeline.querySelector(`li[data-stage="${stageId}"]`);
@@ -500,7 +670,6 @@ if __name__ == "__main__":
         }
     }
 
-    // Iniciar el bucle de estado
     setInterval(refreshPipelineStatus, 2000);
     refreshPipelineStatus();
 
@@ -509,13 +678,10 @@ if __name__ == "__main__":
     // ==================================================
     async function refreshFaceModule() {
         try {
-            // 1) Actualizar imagen de la cámara
             if (faceImage) {
-                // Añadimos timestamp para evitar caché del navegador
                 faceImage.src = `/api/face-frame?t=${Date.now()}`;
             }
 
-            // 2) Actualizar pill de estado (cara / sonrisa / captura)
             if (faceStatusPill) {
                 const res = await fetch("/api/face-status");
                 if (!res.ok) return;
@@ -527,8 +693,6 @@ if __name__ == "__main__":
                 if (data.photo_taken) {
                     faceStatusPill.textContent = "Foto capturada";
                     faceStatusPill.className = "status-pill status-done";
-
-                    // Marcamos también la etapa de captura en la timeline
                     markStageAsDone("face_capture");
 
                 } else if (data.face_present) {
@@ -541,7 +705,6 @@ if __name__ == "__main__":
                         faceStatusPill.className = "status-pill status-idle";
                     }
 
-                    // Marcamos la etapa de detección cuando haya rostro
                     markStageAsDone("face_detect");
 
                 } else {
@@ -554,9 +717,71 @@ if __name__ == "__main__":
         }
     }
 
-    // Refrescar cara cada 500 ms
     setInterval(refreshFaceModule, 800);
     refreshFaceModule();
+
+    // ==================================================
+    // 4. MÓDULO IA: LLAMADA AL BACKEND
+    // ==================================================
+
+    async function triggerIAProcess() {
+        try {
+            if (iaStatusPill) {
+                iaStatusPill.textContent = "Procesando IA...";
+                iaStatusPill.className = "status-pill status-active";
+            }
+
+            const res = await fetch("/api/run-ia", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                }
+            });
+
+            const data = await res.json();
+
+            if (res.ok && data.ok) {
+                console.log("✅ IA completada. Imagen en:", data.url);
+                markStageAsDone("ia_edit");
+                updateIAImage(data.url);
+
+                if (iaStatusPill) {
+                    iaStatusPill.textContent = "Completado";
+                    iaStatusPill.className = "status-pill status-done";
+                }
+            } else {
+                console.warn("⚠️ Error en IA:", data.error || res.statusText);
+                iaRequested = false; // Permitimos reintentar si hace falta
+                if (iaStatusPill) {
+                    iaStatusPill.textContent = "Error IA";
+                    iaStatusPill.className = "status-pill status-pending";
+                }
+            }
+        } catch (err) {
+            console.error("❌ Error llamando a /api/run-ia:", err);
+            iaRequested = false;
+            if (iaStatusPill) {
+                iaStatusPill.textContent = "Error IA";
+                iaStatusPill.className = "status-pill status-pending";
+            }
+        }
+    }
+
+    async function updateIAImage(forceUrl) {
+        try {
+            let url = forceUrl;
+            if (!url) {
+                const res = await fetch("/api/ia-image-url");
+                const data = await res.json();
+                url = data.url;
+            }
+            if (iaImage && url) {
+                iaImage.src = `${url}?t=${Date.now()}`;
+            }
+        } catch (err) {
+            console.error("Error refrescando imagen IA:", err);
+        }
+    }
 });
 <!doctype html>
 <html lang="es">
@@ -809,329 +1034,4 @@ if __name__ == "__main__":
     </div>
 </div>
 
-{% endblock %}# reconcoimiento_facial/smile_detector.py
-
-import threading
-import time
-from typing import Optional, Dict, Any, Tuple
-
-import cv2
-import numpy as np
-from deepface import DeepFace
-
-
-class SmileDetector:
-    """Captura vídeo, mide 'happy' con DeepFace y dispara una foto al sonreír.
-
-    - No abre ventanas de OpenCV.
-    - Solo detecta caras dentro del ROI central (el recuadro blanco).
-    - Marca únicamente la mejor cara (más grande) dentro del ROI.
-    - Usa directamente la caja de DeepFace (sin suavizado de posición).
-    - Guarda la foto en disco y expone:
-        * último frame anotado (para servirlo por HTTP)
-        * estado actual (happy_smooth, si ya hay foto, etc.)
-    """
-
-    def __init__(
-        self,
-        cam_index: int = 0,
-        frame_w: int = 1920,
-        frame_h: int = 1080,
-        happy_threshold: float = 60.0,
-        min_smile_frames: int = 5,
-        process_every_n: int = 2,
-        detector_backend: str = "retinaface",
-        capture_path: str = "smile_capture.jpg",
-        center_rect: Tuple[float, float, float, float] = (0.2, 0.2, 0.8, 0.8),
-        box_smooth_alpha: float = 0.7,      # ya no se usa, pero lo mantengo por compatibilidad
-        happy_smooth_alpha: float = 0.7,
-        miss_tol_frames: int = 5,
-    ) -> None:
-        self.cam_index = cam_index
-        self.frame_w = frame_w
-        self.frame_h = frame_h
-
-        self.happy_threshold = happy_threshold
-        self.min_smile_frames = min_smile_frames
-        self.process_every_n = process_every_n
-
-        self.detector_backend = detector_backend
-        self.capture_path = capture_path
-
-        self.center_rect = center_rect
-        self.box_smooth_alpha = box_smooth_alpha
-        self.happy_smooth_alpha = happy_smooth_alpha
-        self.miss_tol_frames = miss_tol_frames
-
-        # Estado interno
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-
-        self._lock = threading.Lock()
-        self._last_frame: Optional[np.ndarray] = None
-        self._happy_smooth: float = 0.0
-        self._face_present: bool = False
-        self._photo_taken: bool = False
-
-        # Para depurar si hace falta
-        self._debug_last_happy_raw: float = 0.0
-
-    # ===========================
-    #     API pública (Flask)
-    # ===========================
-
-    def start(self) -> None:
-        """Arranca el hilo de captura y análisis (no bloqueante)."""
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self, timeout: float = 2.0) -> None:
-        """Detiene el hilo de captura (por ejemplo al cerrar la app)."""
-        self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-
-    def get_frame_jpeg(self) -> Optional[bytes]:
-        """Devuelve el último frame ANOTADO como bytes JPEG."""
-        with self._lock:
-            if self._last_frame is None:
-                return None
-            ok, buf = cv2.imencode(".jpg", self._last_frame)
-        if not ok:
-            return None
-        return buf.tobytes()
-
-    def get_state(self) -> Dict[str, Any]:
-        """Devuelve un snapshot del estado actual para exponerlo por API."""
-        with self._lock:
-            state = {
-                "happy": float(self._happy_smooth),
-                "happy_threshold": float(self.happy_threshold),
-                "face_present": bool(self._face_present),
-                "photo_taken": bool(self._photo_taken),
-                "capture_path": self.capture_path if self._photo_taken else None,
-                "debug_last_happy_raw": float(self._debug_last_happy_raw),
-            }
-        return state
-
-    # ===========================
-    #     Bucle interno
-    # ===========================
-
-    def _loop(self) -> None:
-        cap = cv2.VideoCapture(self.cam_index)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_h)
-
-        if not cap.isOpened():
-            print("[SmileDetector] No se pudo abrir la cámara")
-            self._running = False
-            return
-
-        frame_idx = 0
-        happy_smooth: Optional[float] = None
-
-        last_box: Optional[Tuple[float, float, float, float]] = None
-        miss_count = 0
-        smile_consec = 0
-
-        print(
-            f"[SmileDetector] Iniciado. Umbral happy_smooth > {self.happy_threshold:.0f}% "
-            f"durante {self.min_smile_frames} frames."
-        )
-
-        cx1_rel, cy1_rel, cx2_rel, cy2_rel = self.center_rect
-
-        try:
-            while self._running:
-                ok, frame = cap.read()
-                if not ok:
-                    print("[SmileDetector] Frame no válido, saliendo del bucle.")
-                    break
-
-                display = frame.copy()
-                h, w = display.shape[:2]
-
-                # Rectángulo central guía (ROI)
-                cx1 = int(w * cx1_rel)
-                cy1 = int(h * cy1_rel)
-                cx2 = int(w * cx2_rel)
-                cy2 = int(h * cy2_rel)
-                cv2.rectangle(display, (cx1, cy1), (cx2, cy2), (255, 255, 255), 1)
-
-                # Recortamos el ROI: solo detectamos caras dentro del recuadro blanco
-                roi = frame[cy1:cy2, cx1:cx2]
-
-                new_happy: Optional[float] = None
-                new_box: Optional[Tuple[float, float, float, float]] = None
-
-                # DeepFace cada N frames (sobre el ROI, no sobre toda la imagen)
-                if frame_idx % self.process_every_n == 0:
-                    try:
-                        result = DeepFace.analyze(
-                            img_path=roi,
-                            actions=["emotion"],
-                            detector_backend=self.detector_backend,
-                            enforce_detection=False,
-                        )
-
-                        # DeepFace puede devolver dict o lista de dicts (varias caras)
-                        if isinstance(result, list):
-                            candidates = result
-                        else:
-                            candidates = [result]
-
-                        best_region = None
-                        best_emotions = None
-                        best_area = 0.0
-
-                        for r in candidates:
-                            region = r.get("region", {})
-                            if (
-                                not region
-                                or region.get("w", 0) <= 0
-                                or region.get("h", 0) <= 0
-                            ):
-                                continue
-
-                            w_face = float(region["w"])
-                            h_face = float(region["h"])
-                            area = w_face * h_face
-                            if area <= 0:
-                                continue
-
-                            if area > best_area:
-                                best_area = area
-                                best_region = region
-                                best_emotions = r.get("emotion", {})
-
-                        if best_region is not None and best_emotions is not None:
-                            # Emociones de la mejor cara
-                            new_happy = float(best_emotions.get("happy", 0.0))
-
-                            # Convertimos coords ROI -> coords globales de la imagen
-                            x_roi = float(best_region["x"])
-                            y_roi = float(best_region["y"])
-                            ww = float(best_region["w"])
-                            hh = float(best_region["h"])
-
-                            x = x_roi + cx1
-                            y = y_roi + cy1
-                            new_box = (x, y, ww, hh)
-
-                    except Exception as e:
-                        # Si falla DeepFace, no paramos todo
-                        print(f"[SmileDetector] Error en DeepFace: {e}")
-                        new_happy = None
-                        new_box = None
-
-                # Suavizado de happy (mantenemos para que no salte tanto)
-                if new_happy is not None:
-                    if happy_smooth is None:
-                        happy_smooth = new_happy
-                    else:
-                        happy_smooth = (
-                            self.happy_smooth_alpha * happy_smooth
-                            + (1.0 - self.happy_smooth_alpha) * new_happy
-                        )
-                elif happy_smooth is None:
-                    happy_smooth = 0.0
-
-                # Gestión de caja SIN suavizado de posición:
-                # usamos siempre la última detección directa, solo con tolerancia de pérdida
-                if new_box is not None:
-                    miss_count = 0
-                    last_box = new_box
-                else:
-                    if last_box is not None:
-                        miss_count += 1
-                        if miss_count > self.miss_tol_frames:
-                            last_box = None
-                            miss_count = 0
-
-                # Dibujar caja si la tenemos
-                face_present = last_box is not None
-                if last_box is not None:
-                    x, y, ww, hh = last_box
-                    x1 = max(0, int(x))
-                    y1 = max(0, int(y))
-                    x2 = min(w, int(x + ww))
-                    y2 = min(h, int(y + hh))
-                    cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                # Lógica de sonrisa / disparo de foto
-                happy_to_show = float(happy_smooth if happy_smooth is not None else 0.0)
-                photo_taken_now = False
-
-                if (
-                    happy_to_show >= self.happy_threshold
-                    and not self._photo_taken
-                ):
-                    smile_consec += 1
-                else:
-                    smile_consec = 0
-
-                if not self._photo_taken and smile_consec >= self.min_smile_frames:
-                    # Guardamos la foto (frame original, sin overlays)
-                    try:
-                        cv2.imwrite(self.capture_path, frame)
-                        print(
-                            f"[SmileDetector] Sonrisa detectada (happy_smooth={happy_to_show:.1f}%). "
-                            f"Foto guardada en {self.capture_path}"
-                        )
-                        photo_taken_now = True
-                    except Exception as e:
-                        print(f"[SmileDetector] Error guardando la foto: {e}")
-
-                # Texto en el frame
-                cv2.putText(
-                    display,
-                    f"Happy (suavizado): {happy_to_show:.1f}%",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 255, 0)
-                    if happy_to_show >= self.happy_threshold
-                    else (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                if self._photo_taken or photo_taken_now:
-                    status_text = "Foto capturada. Sonríe de nuevo para reemplazar."
-                    status_color = (0, 255, 0)
-                else:
-                    status_text = "Mete tu cara en el recuadro y SONRIE fuerte."
-                    status_color = (255, 255, 255)
-
-                cv2.putText(
-                    display,
-                    status_text,
-                    (20, display.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    status_color,
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                # Actualizamos estado compartido
-                with self._lock:
-                    self._last_frame = display
-                    self._happy_smooth = happy_to_show
-                    self._face_present = face_present
-                    if photo_taken_now:
-                        self._photo_taken = True
-                    self._debug_last_happy_raw = float(new_happy or 0.0)
-
-                frame_idx += 1
-                # Mini pausa para no saturar CPU
-                time.sleep(0.01)
-
-        finally:
-            cap.release()
-            print("[SmileDetector] Cámara liberada, fin del hilo.")
-            self._running = False
+{% endblock %}

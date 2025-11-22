@@ -1,353 +1,301 @@
 import os
 import sys
 import json
+import base64
+import cv2
+import numpy as np
 from flask import Flask, render_template, jsonify, url_for, Response, request
 from flask_cors import CORS
-
 from google import genai
 from PIL import Image
 import io
 
-# --- 1. IMPORTACIÓN LIMPIA DEL MÓDULO SUPERIOR ---
+# --- 1. IMPORTACIÓN DEL MÓDULO SUPERIOR (VOZ) ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, ".."))
 sys.path.append(project_root)
 
 from voice_module import VoiceEngine
-from reconcoimiento_facial.smile_detector import SmileDetector
-
 
 app = Flask(__name__)
 CORS(app)
 
 # =========================
-#   VOICE ENGINE (VOSK)
+#  CONFIGURACIÓN: VOZ (VOSK)
 # =========================
-
 MODEL_PATH = os.path.join(project_root, "vosk-model-small-es-0.42")
-
 print(f"⚙️ Inicializando VoiceEngine desde: {MODEL_PATH}")
-motor_voz = VoiceEngine(MODEL_PATH)
+
+try:
+    # Inicializamos el motor de voz (Micrófono del SERVIDOR/PC)
+    motor_voz = VoiceEngine(MODEL_PATH)
+except Exception as e:
+    print(f"⚠️ Error cargando voz (¿falta modelo?): {e}")
+    motor_voz = None
 
 # =========================
-#   ESTADO DEL PIPELINE
+#  CONFIGURACIÓN: VISIÓN (OPENCV)
 # =========================
+# Usamos Haar Cascades porque son rápidos para procesar peticiones HTTP
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
 
-pipeline_flags = {
-    "speech_done": False,      # /api/listen-command OK
-    "last_prompt": None,       # prompt final en inglés
-    "ia_in_progress": False,   # IA generativa en marcha
-    "ia_done": False,          # IA generativa terminada
-}
-
-# =========================
-#   SMILE DETECTOR
-# =========================
-
+# Directorios de imágenes
 STATIC_DIR = os.path.join(current_dir, "static")
-
-# Foto de la cara (entrada a la IA)
 CAPTURE_REL = os.path.join("img", "smile_capture.jpg")
 CAPTURE_PATH = os.path.join(STATIC_DIR, CAPTURE_REL)
-os.makedirs(os.path.dirname(CAPTURE_PATH), exist_ok=True)
-
-print(f"📸 Inicializando SmileDetector. Foto irá a: {CAPTURE_PATH}")
-smile_detector = SmileDetector(
-    cam_index=0,
-    frame_w=1280,
-    frame_h=720,
-    happy_threshold=60.0,
-    min_smile_frames=5,
-    process_every_n=6,
-    detector_backend="opencv",
-    capture_path=CAPTURE_PATH,
-)
-smile_detector.start()
-
-# =========================
-#   CONFIG IA (GEMINI)
-# =========================
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL_NAME = "gemini-2.5-flash-image"
-
-# Imagen salida IA
 IA_OUTPUT_REL = os.path.join("img", "ia_result.png")
 IA_OUTPUT_PATH = os.path.join(STATIC_DIR, IA_OUTPUT_REL)
 
+os.makedirs(os.path.dirname(CAPTURE_PATH), exist_ok=True)
 
 # =========================
-#   RUTAS WEB
+#  ESTADO GLOBAL DEL PIPELINE
+# =========================
+pipeline_flags = {
+    "face_detected": False,
+    "smile_detected": False,
+    "happy_score": 0,
+    "photo_taken": False,
+    
+    "speech_done": False,
+    "last_prompt": None,
+    
+    "ia_in_progress": False,
+    "ia_done": False,
+}
+
+# =========================
+#  CONFIGURACIÓN: GEMINI API
+# =========================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL_NAME = "gemini-1.5-flash" # Ajusta según tu disponibilidad (o 2.5-flash si tienes acceso)
+
+# =========================
+#  RUTAS FLASK
 # =========================
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
-# -------------------------
-#   VOZ → PROMPT
-# -------------------------
-@app.route("/api/listen-command", methods=["POST"])
-def listen_command():
-    print("🎤 Web pide activar escucha...")
-    
+# --- 1. PROCESAR FRAME DEL IPHONE (VISIÓN) ---
+@app.route("/api/process-frame", methods=["POST"])
+def process_frame():
+    """
+    Recibe una imagen en Base64 desde el navegador (iPhone),
+    detecta si hay cara/sonrisa y guarda la foto si corresponde.
+    """
     try:
-        prompt = motor_voz.escuchar_y_obtener_prompt()
+        data = request.json
+        image_data = data.get('image')
         
-        if prompt:
-            # ✅ Marcamos que la fase de voz/STT ha terminado correctamente
-            pipeline_flags["speech_done"] = True
-            pipeline_flags["last_prompt"] = prompt
+        if not image_data:
+            return jsonify({"ok": False, "error": "No image data"}), 400
 
-            # Cuando hay prompt nuevo, reseteamos la IA generativa
-            pipeline_flags["ia_done"] = False
-            pipeline_flags["ia_in_progress"] = False
-            # (opcional: podrías borrar la imagen anterior ia_result.png)
+        # 1. Decodificar Base64 a imagen OpenCV
+        # Formato data:image/jpeg;base64,/9j/4AAQSk...
+        header, encoded = image_data.split(",", 1)
+        nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-            return jsonify({
-                "ok": True,
-                "transcript": prompt
-            })
-        else:
-            return jsonify({
-                "ok": False,
-                "message": "No se detectó comando o se canceló."
-            }), 400
+        # 2. Detección de Rostro y Sonrisa
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        
+        face_present = len(faces) > 0
+        is_smiling = False
+        current_score = 0
 
-    except Exception as e:
-        print(f"❌ Error en el motor de voz: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y:y+h, x:x+w]
+            # Ajustar parámetros (1.8, 20) si detecta muchas falsas sonrisas
+            smiles = smile_cascade.detectMultiScale(roi_gray, 1.8, 20)
+            
+            if len(smiles) > 0:
+                is_smiling = True
+                current_score = 90  # Valor simulado alto
+            else:
+                current_score = 10  # Valor simulado bajo
 
+        # 3. Lógica de Captura Automática
+        if is_smiling and not pipeline_flags["photo_taken"]:
+            cv2.imwrite(CAPTURE_PATH, frame)
+            pipeline_flags["photo_taken"] = True
+            print("📸 ¡Sonrisa detectada en iPhone y guardada en servidor!")
 
-# -------------------------
-#   ESTADO GLOBAL PIPELINE
-# -------------------------
-@app.route("/api/status")
-def api_status():
-    """
-    Devuelve el estado del pipeline para la UI:
-      - progress_percent: 0-100
-      - current_stage: id del paso actual
-      - stages: lista con id y status ('pending' | 'active' | 'done')
-    """
-
-    # 1) Cara / sonrisa / captura
-    smile_state = smile_detector.get_state()
-    face_present = smile_state.get("face_present", False)
-    photo_taken = smile_state.get("photo_taken", False)
-
-    if photo_taken:
-        face_detect_status = "done"
-        face_capture_status = "done"
-    elif face_present:
-        face_detect_status = "done"
-        face_capture_status = "active"
-    else:
-        face_detect_status = "active"
-        face_capture_status = "pending"
-
-    # 2) Voz
-    speech_done = pipeline_flags.get("speech_done", False)
-    speech_status = "done" if speech_done else "pending"
-
-    # 3) IA generativa
-    ia_done = pipeline_flags.get("ia_done", False)
-    ia_in_progress = pipeline_flags.get("ia_in_progress", False)
-
-    if ia_done:
-        ia_edit_status = "done"
-    elif ia_in_progress:
-        ia_edit_status = "active"
-    else:
-        # Solo tiene sentido activar IA cuando cara y voz están listas
-        if photo_taken and speech_done:
-            ia_edit_status = "active"  # el frontend puede usar esto para mostrar "listo para IA"
-        else:
-            ia_edit_status = "pending"
-
-    # 4) Contornos / robot (por ahora pendientes)
-    contours_status = "pending"
-    robot_draw_status = "pending"
-
-    stages = [
-        {"id": "face_detect",  "status": face_detect_status},
-        {"id": "face_capture", "status": face_capture_status},
-        {"id": "speech",       "status": speech_status},
-        {"id": "ia_edit",      "status": ia_edit_status},
-        {"id": "contours",     "status": contours_status},
-        {"id": "robot_draw",   "status": robot_draw_status},
-    ]
-
-    done_count = sum(1 for s in stages if s["status"] == "done")
-    total = len(stages)
-    progress_percent = int(100 * done_count / total) if total > 0 else 0
-
-    current_stage = "idle"
-    for s in stages:
-        if s["status"] != "done":
-            current_stage = s["id"]
-            break
-
-    return jsonify({
-        "progress_percent": progress_percent,
-        "current_stage": current_stage,
-        "stages": stages
-    })
-
-
-# -------------------------
-#   IA: LANZAR PROCESO
-# -------------------------
-@app.route("/api/run-ia", methods=["POST"])
-def api_run_ia():
-    """
-    Lanza el procesado IA:
-      - Usa la foto de SmileDetector (smile_capture.jpg)
-      - Usa el último prompt de VoiceEngine
-      - Llama al modelo Gemini y guarda ia_result.png
-    """
-    if GEMINI_API_KEY is None:
-        return jsonify({
-            "ok": False,
-            "error": "GEMINI_API_KEY no está definida en el entorno"
-        }), 500
-
-    # Comprobamos que haya foto
-    smile_state = smile_detector.get_state()
-    if not smile_state.get("photo_taken", False):
-        return jsonify({
-            "ok": False,
-            "error": "Todavía no hay foto capturada."
-        }), 400
-
-    # Comprobamos que haya prompt
-    prompt = pipeline_flags.get("last_prompt")
-    if not prompt:
-        return jsonify({
-            "ok": False,
-            "error": "Todavía no hay prompt de voz válido."
-        }), 400
-
-    # Evitar dobles ejecuciones simultáneas
-    if pipeline_flags.get("ia_in_progress", False):
-        return jsonify({
-            "ok": False,
-            "error": "La IA ya está procesando."
-        }), 409
-
-    print("✨ Lanzando IA generativa con Gemini...")
-    pipeline_flags["ia_in_progress"] = True
-
-    try:
-        # 1) Cliente
-        client = genai.Client(api_key=GEMINI_API_KEY)
-
-        # 2) Cargar la imagen capturada
-        if not os.path.exists(CAPTURE_PATH):
-            pipeline_flags["ia_in_progress"] = False
-            return jsonify({
-                "ok": False,
-                "error": f"No se encuentra la imagen de entrada en {CAPTURE_PATH}"
-            }), 500
-
-        img = Image.open(CAPTURE_PATH)
-
-        # 3) Llamada al modelo
-        response = client.models.generate_content(
-            model=GEMINI_MODEL_NAME,
-            contents=[prompt, img]
-        )
-
-        # 4) Buscar imagen en la respuesta
-        image_found = False
-        if response.candidates and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if getattr(part, "inline_data", None):
-                    try:
-                        image_bytes = part.inline_data.data
-                        image_output = Image.open(io.BytesIO(image_bytes))
-                        os.makedirs(os.path.dirname(IA_OUTPUT_PATH), exist_ok=True)
-                        image_output.save(IA_OUTPUT_PATH)
-                        image_found = True
-                        print(f"🎉 IA: imagen guardada en {IA_OUTPUT_PATH}")
-                        break
-                    except Exception as e:
-                        print(f"⚠️ Error guardando la imagen devuelta por la IA: {e}")
-
-                if getattr(part, "text", None):
-                    print(f"📝 Respuesta IA (texto): {part.text}")
-
-        if not image_found:
-            pipeline_flags["ia_in_progress"] = False
-            return jsonify({
-                "ok": False,
-                "error": "La IA no devolvió ninguna imagen nueva."
-            }), 500
-
-        # Éxito
-        pipeline_flags["ia_in_progress"] = False
-        pipeline_flags["ia_done"] = True
+        # 4. Actualizar flags globales
+        pipeline_flags["face_detected"] = face_present
+        pipeline_flags["smile_detected"] = is_smiling
+        pipeline_flags["happy_score"] = current_score
 
         return jsonify({
             "ok": True,
-            "url": url_for("static", filename=IA_OUTPUT_REL)
+            "face": face_present,
+            "smile": is_smiling,
+            "taken": pipeline_flags["photo_taken"]
         })
 
     except Exception as e:
+        print(f"❌ Error procesando frame: {e}")
+        return jsonify({"ok": False}), 500
+
+
+# --- 2. PROCESAR VOZ (AUDIO) ---
+@app.route("/api/listen-command", methods=["POST"])
+def listen_command():
+    print("🎤 Web pide activar escucha (Micrófono del SERVIDOR)...")
+    
+    if not motor_voz:
+        return jsonify({"ok": False, "message": "Motor de voz no disponible"}), 500
+
+    try:
+        # Escucha por el micro del PC Ubuntu
+        prompt = motor_voz.escuchar_y_obtener_prompt()
+        
+        if prompt:
+            pipeline_flags["speech_done"] = True
+            pipeline_flags["last_prompt"] = prompt
+            
+            # Si cambiamos el prompt, reseteamos la IA para permitir generar de nuevo
+            pipeline_flags["ia_done"] = False
+            pipeline_flags["ia_in_progress"] = False
+            
+            return jsonify({"ok": True, "transcript": prompt})
+        else:
+            return jsonify({"ok": False, "message": "No se detectó comando o se canceló."}), 400
+
+    except Exception as e:
+        print(f"❌ Error voz: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# --- 3. ESTADO GLOBAL (STATUS) ---
+@app.route("/api/status")
+def api_status():
+    """Devuelve el estado de todo el sistema para que el JS actualice la UI"""
+    
+    photo_taken = pipeline_flags["photo_taken"]
+    face_present = pipeline_flags["face_detected"]
+    
+    # Lógica de estados para el Timeline
+    face_status = "done" if photo_taken else ("active" if face_present else "active")
+    capture_status = "done" if photo_taken else "pending"
+    speech_status = "done" if pipeline_flags["speech_done"] else "pending"
+    
+    ia_status = "pending"
+    if pipeline_flags["ia_done"]: 
+        ia_status = "done"
+    elif pipeline_flags["ia_in_progress"]: 
+        ia_status = "active"
+    elif photo_taken and pipeline_flags["speech_done"]: 
+        # Si hay foto y voz, la IA está lista (aunque pendiente de disparar)
+        ia_status = "pending"
+
+    stages = [
+        {"id": "face_detect",  "status": face_status},
+        {"id": "face_capture", "status": capture_status},
+        {"id": "speech",       "status": speech_status},
+        {"id": "ia_edit",      "status": ia_status},
+        {"id": "robot_draw",   "status": "pending"},
+    ]
+
+    # Calcular porcentaje
+    done_count = sum(1 for s in stages if s["status"] == "done")
+    progress_percent = int(100 * done_count / len(stages))
+
+    return jsonify({
+        "progress_percent": progress_percent,
+        "stages": stages,
+        # Extras para las píldoras de estado
+        "happy": pipeline_flags["happy_score"],
+        "happy_threshold": 50,
+        "face_present": face_present,
+        "photo_taken": photo_taken
+    })
+
+
+# --- 4. GENERAR IMAGEN (IA) ---
+@app.route("/api/run-ia", methods=["POST"])
+def api_run_ia():
+    if not GEMINI_API_KEY:
+        return jsonify({"ok": False, "error": "Falta GEMINI_API_KEY"}), 500
+    
+    # Validaciones previas
+    if not pipeline_flags["photo_taken"]:
+        return jsonify({"ok": False, "error": "Falta la foto"}), 400
+    if not pipeline_flags["last_prompt"]:
+        return jsonify({"ok": False, "error": "Falta el comando de voz"}), 400
+    if pipeline_flags["ia_in_progress"]:
+        return jsonify({"ok": False, "error": "IA ocupada"}), 409
+
+    pipeline_flags["ia_in_progress"] = True
+    print("✨ Ejecutando Gemini...")
+
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        if not os.path.exists(CAPTURE_PATH):
+            raise Exception("No encuentro el archivo smile_capture.jpg")
+            
+        img = Image.open(CAPTURE_PATH)
+        
+        # Llamada a Gemini
+        response = client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents=[pipeline_flags["last_prompt"], img]
+        )
+        
+        # Procesar respuesta (Buscar imagen dentro)
+        found_image = False
+        if response.candidates:
+            for part in response.candidates[0].content.parts:
+                if getattr(part, "inline_data", None):
+                    image_bytes = part.inline_data.data
+                    image_output = Image.open(io.BytesIO(image_bytes))
+                    image_output.save(IA_OUTPUT_PATH)
+                    found_image = True
+                    break
+        
         pipeline_flags["ia_in_progress"] = False
-        print(f"❌ Error crítico en IA: {e}")
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
+        
+        if found_image:
+            pipeline_flags["ia_done"] = True
+            return jsonify({"ok": True, "url": url_for("static", filename=IA_OUTPUT_REL)})
+        else:
+            return jsonify({"ok": False, "error": "La IA no devolvió una imagen"}), 500
 
+    except Exception as e:
+        pipeline_flags["ia_in_progress"] = False
+        print(f"❌ Error IA: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# -------------------------
-#   IA: URL DE LA IMAGEN
-# -------------------------
+# Helper para obtener la URL actual de la imagen IA
 @app.route("/api/ia-image-url")
 def ia_image_url():
-    """
-    Devuelve la URL de la imagen IA:
-      - Si hay resultado: ia_result.png
-      - Si no, el placeholder original.
-    """
-    if pipeline_flags.get("ia_done", False) and os.path.exists(IA_OUTPUT_PATH):
+    if pipeline_flags["ia_done"]:
         return jsonify({"url": url_for("static", filename=IA_OUTPUT_REL)})
-    else:
-        return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
+    return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
 
+# --- 5. RESET ---
+@app.route("/api/reset")
+def api_reset():
+    pipeline_flags["photo_taken"] = False
+    pipeline_flags["face_detected"] = False
+    pipeline_flags["smile_detected"] = False
+    pipeline_flags["speech_done"] = False
+    pipeline_flags["ia_done"] = False
+    pipeline_flags["ia_in_progress"] = False
+    print("🔄 Sistema reseteado")
+    return jsonify({"ok": True})
 
-# -------------------------
-#   ROBOT CAM (placeholder)
-# -------------------------
+# --- ROBOT STREAM (Placeholder) ---
 @app.route("/robot_stream")
 def robot_stream():
     return url_for('static', filename='img/robot_placeholder.jpg')
 
 
-# -------------------------
-#   FACE: FRAME + ESTADO
-# -------------------------
-@app.route("/api/face-frame")
-def api_face_frame():
-    jpeg = smile_detector.get_frame_jpeg()
-    if jpeg is None:
-        return app.send_static_file("img/face_placeholder.jpg")
-    return Response(jpeg, mimetype="image/jpeg")
-
-
-@app.route("/api/face-status")
-def api_face_status():
-    return jsonify(smile_detector.get_state())
-
-
-@app.route("/face_stream")
-def face_stream():
-    return url_for("api_face_frame")
-
-
 if __name__ == "__main__":
-    # use_reloader=False es vital para no cargar el modelo Vosk dos veces
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    # Recuerda usar NGROK para acceder desde iPhone con HTTPS:
+    # ngrok http 5000
+    app.run(host="0.0.0.0", port=5000, debug=True)
