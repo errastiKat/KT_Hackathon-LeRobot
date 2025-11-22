@@ -1,1430 +1,1137 @@
-export TF_USE_LEGACY_KERAS=1
-
-# 0) (opcional) Asegura que tienes todas las libs cu12 instaladas en el venv
-pip3 install --upgrade --no-cache-dir \
-  "onnxruntime-gpu>=1.23" \
-  "nvidia-cuda-runtime-cu12>=12,<13" \
-  "nvidia-cuda-nvrtc-cu12>=12,<13" \
-  "nvidia-cuda-cupti-cu12>=12,<13" \
-  "nvidia-cublas-cu12>=12,<13" \
-  "nvidia-cufft-cu12>=11,<12" \
-  "nvidia-curand-cu12>=10,<11" \
-  "nvidia-cusolver-cu12>=11,<12" \
-  "nvidia-cusparse-cu12>=12,<13" \
-  "nvidia-cudnn-cu12>=9,<10" \
-  "nvidia-nvjitlink-cu12>=12,<13"
-
-# 1) Localiza site-packages del venv
-BASE=$(python3 - <<'PY'
-import site, os
-c=[]
-try: c+=site.getsitepackages()
-except Exception: pass
-c.append(site.getusersitepackages())
-for p in c:
-    if p and os.path.isdir(p):
-        print(p); break
-PY
-)
-
-# 2) Recoge todas las carpetas .../site-packages/nvidia/*/lib*
-CU_PATHS=$(find "$BASE/nvidia" -maxdepth 2 -type d -name 'lib*' 2>/dev/null | paste -sd: -)
-
-# 3) Exporta LD_LIBRARY_PATH para esta shell
-[ -n "$CU_PATHS" ] && export LD_LIBRARY_PATH="$CU_PATHS:${LD_LIBRARY_PATH}"
-
-# 4) Comprueba que aparecen rutas como .../nvidia/cublas/lib y .../nvidia/cufft/lib
-echo "LD_LIBRARY_PATH:"
-echo "$LD_LIBRARY_PATH" | tr ':' '\n' | sed '/^$/d'
-
-# 5) Test rápido de ONNX Runtime (debe mostrar CUDAExecutionProvider)
-python3 - << 'PY'
-import onnxruntime as ort, numpy as np, os
-print("available providers:", ort.get_available_providers())
-m = os.environ.get("ARC_FACE_ONNX","glintr100.onnx")
-sess = ort.InferenceSession(m, providers=["CUDAExecutionProvider","CPUExecutionProvider"])
-print("session providers:", sess.get_providers())
-xname = sess.get_inputs()[0].name
-yname = sess.get_outputs()[0].name
-x = (np.zeros((1,3,112,112),dtype=np.float32))
-y = sess.run([yname], {xname:x})[0]
-print("ok salida:", y.shape, y.dtype)
-PY
-
-Prompt: "Estoy trabajando en ubutnu22.04, y tengo un iphone, y estoy conectaod a la misma red wifi. Tengo este codigo ya funcional que lo que hace es coger la camara del portatil y saca una foto si sonries. y todo esto publicandolo en un webserver. Lo que quiero es hacer un nuevo script de reconocimiento que haga exactamente lo mismo, pero que en vez de coger el video de la camara del portatil quiero que el propio webserver sea el que habra la camara, asi puedo conseguir que todo esto corra en el iphone, es decir desde el portatil ejecuto el back-end y desde el iphone cargo el front-end, entonces que coja la camara frontal del portatil, el back-end porcesa el reconocimiento facial y lo vuelve a publicar en la pagina web. basicamente lo que ya tenemos pero cambiando de donde viene la camara. Luego tambien tenemos reconocimiento por voz, peor esto ya esta integrado en el webserver en el browser y ya funciona, no es competencia de esta practica pero para que sepas. te voy a sar los archivos que ya tengo y analices una posible solucion. (env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ ls
-
-app.py  static  templates
-
-(env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ cat app.py 
-
 import os
-
 import sys
+import json
+import pyaudio
+from vosk import Model, KaldiRecognizer
+from deep_translator import GoogleTranslator
 
+class VoiceEngine:
+    def __init__(self, model_path, device_index=None):
+        self.device_index = device_index
+        self.sample_rate = 16000
+        
+        # --- 1. CARGA DEL MODELO ---
+        if not os.path.exists(model_path):
+            print(f"[ERROR] No encuentro el modelo en: {model_path}")
+            sys.exit(1)
+            
+        print(f"[INFO] Cargando modelo Vosk...")
+        try:
+            self.model = Model(model_path)
+            self.translator = GoogleTranslator(source='es', target='en')
+            print("[INFO] Motor de voz listo (Modo Modificacion de Cara).")
+        except Exception as e:
+            print(f"[ERROR CRITICO] {e}")
+            sys.exit(1)
+
+        # --- 2. TRIGGERS (Intencion de pedir) ---
+        self.triggers = [
+            "quiero", "ponme", "dame", "añade", "dibuja", "dibújame", 
+            "generame", "hazme", "pon", "crea", "me gustaría", "tengo"
+        ]
+
+        # --- 3. FILTRO NAVIDENO (Keywords obligatorias) ---
+        self.christmas_keywords = [
+            "navidad", "navideño", "navideña", "pascua",
+            "santa", "claus", "papá noel", "papa noel",
+            "reno", "rudolph", "cuernos", "trineo",
+            "elfo", "duende", "gnomo",
+            "nieve", "invierno", "copo", "hielo",
+            "regalo", "lazo", 
+            "árbol", "abeto", "pino", "luces", "guirnalda",
+            "gorro", "bufanda", "muérdago", "campana",
+            "barba", "bigote", "gafas" # Anadimos rasgos faciales tipicos aunque no sean 100% navidad
+        ]
+
+        # --- 4. ESTILO ROBOT + PRESERVACION DE CARA ---
+        # prompt_prefix: Fuerza a la IA a saber que hay una persona base
+        self.prompt_prefix = "portrait of the person in the input image modified to have "
+        
+        # tech_prompt: El estilo de dibujo final
+        self.tech_prompt = (
+            ", high quality line art, thick black contours, minimalist sketch, "
+            "vector style, white background, no shading, no gray scales, "
+            "clean strokes, coloring book style, sharp edges, christmas atmosphere."
+        )
+
+    def escuchar_y_obtener_prompt(self):
+        """
+        Escucha -> Valida -> Traduce -> Retorna prompt enfocado en la cara.
+        """
+        rec = KaldiRecognizer(self.model, self.sample_rate)
+        p = pyaudio.PyAudio()
+        
+        try:
+            stream = p.open(format=pyaudio.paInt16,
+                            channels=1,
+                            rate=self.sample_rate,
+                            input=True,
+                            input_device_index=self.device_index,
+                            frames_per_buffer=8000)
+            stream.start_stream()
+            
+            # EJEMPLOS CORRECTOS PARA EL USUARIO
+            print("\n[ESCUCHANDO] Di que quieres cambiar en tu cara. Ej: 'Ponme barba de Santa Claus', 'Quiero cuernos de reno'...")
+
+            while True:
+                data = stream.read(4000, exception_on_overflow=False)
+                if len(data) == 0: continue
+
+                if rec.AcceptWaveform(data):
+                    res = json.loads(rec.Result())
+                    text = res.get("text", "").lower()
+                    
+                    if text and len(text) > 3:
+                        print(f"   [Texto oido]: '{text}'")
+                        
+                        # 1. Verificar trigger
+                        has_trigger = any(trigger in text for trigger in self.triggers)
+                        
+                        if has_trigger:
+                            # 2. VERIFICACION NAVIDENA
+                            is_christmas = any(word in text for word in self.christmas_keywords)
+                            
+                            if is_christmas:
+                                print("   [OK] Peticion valida. Procesando...")
+                                try:
+                                    # Traduccion
+                                    translated_text = self.translator.translate(text)
+                                    print(f"   [Traducido]: '{translated_text}'")
+                                    
+                                    # CONSTRUCCION DEL PROMPT FINAL (La clave del exito)
+                                    # Estructura: [RETRATO DE ESTA PERSONA MODIFICADO CON...] + [LO QUE PIDE EL USUARIO] + [ESTILO]
+                                    final_prompt = (
+                                        f"{self.prompt_prefix} {translated_text}{self.tech_prompt}"
+                                    )
+                                    
+                                    stream.stop_stream()
+                                    stream.close()
+                                    p.terminate()
+                                    return final_prompt
+
+                                except Exception as e:
+                                    print(f"   [WARN] Error traduciendo: {e}. Reintentando...")
+                            else:
+                                print("   [RECHAZADO] No es una peticion navidena valida.")
+                                print("   -> Pide cosas como: 'gorro de navidad', 'barba de santa', 'cuernos de reno'...")
+                        
+                        else:
+                            pass
+
+        except KeyboardInterrupt:
+            print("\n[STOP] Interrumpido por usuario.")
+            if 'stream' in locals():
+                stream.stop_stream()
+                stream.close()
+            p.terminate()
+            return None
+        except Exception as e:
+            print(f"\n[ERROR] {e}")
+            return Noneimport os
+import sys
 from flask import Flask, render_template, jsonify, url_for, Response
-
 from flask_cors import CORS
 
-
-
 # --- 1. IMPORTACIÓN LIMPIA DEL MÓDULO SUPERIOR ---
-
 # Añadimos la carpeta de arriba ("..") a las rutas de Python para poder importar
-
 current_dir = os.path.dirname(os.path.abspath(__file__))
-
 project_root = os.path.abspath(os.path.join(current_dir, ".."))
-
 sys.path.append(project_root)
 
-
-
 # Ahora importamos tu clase directamente. Sin reescribir nada.
-
 from voice_module import VoiceEngine
-
 from reconcoimiento_facial.recognize_smile import SmileDetector
 
 
-
-
-
 app = Flask(__name__)
-
 CORS(app)
 
-
-
 # --- 2. INICIALIZAR TU MOTOR ---
-
 # Definimos la ruta al modelo relativa a la raíz del proyecto
-
 MODEL_PATH = os.path.join(project_root, "vosk-model-small-es-0.42")
 
-
-
 print(f"⚙️ Inicializando VoiceEngine desde: {MODEL_PATH}")
-
 # Instanciamos tu clase. Ella se encarga de cargar Vosk, el traductor, etc.
-
 motor_voz = VoiceEngine(MODEL_PATH)
 
 
-
-
-
 # =========================
-
 #   ESTADO DEL PIPELINE
-
 # =========================
-
-
 
 # Flags muy simples por ahora
-
 pipeline_flags = {
-
     "speech_done": False,   # lo marcaremos a True cuando /api/listen-command tenga éxito
-
 }
 
 
-
-
-
 # =========================
-
 #   SMILE DETECTOR
-
 # =========================
-
-
 
 # Ruta absoluta al static de Flask
-
 STATIC_DIR = os.path.join(current_dir, "static")
 
-
-
 # Vamos a guardar la foto en static/img/smile_capture.jpg
-
 CAPTURE_REL = os.path.join("img", "smile_capture.jpg")
-
 CAPTURE_PATH = os.path.join(STATIC_DIR, CAPTURE_REL)
-
-
 
 os.makedirs(os.path.dirname(CAPTURE_PATH), exist_ok=True)
 
-
-
 print(f"📸 Inicializando SmileDetector. Foto irá a: {CAPTURE_PATH}")
-
 smile_detector = SmileDetector(
-
     cam_index=0,
-
     frame_w=1280,          # antes 1920
-
     frame_h=720,           # antes 1080
-
     happy_threshold=60.0,
-
     min_smile_frames=5,
-
     process_every_n=6,     # antes 2 -> analiza 1 de cada 6 frames
-
     detector_backend="opencv",  # más ligero que 'retinaface'
-
     capture_path=CAPTURE_PATH,
-
 )
-
 smile_detector.start()
 
 
 
 
-
-
-
-
-
 # =========================
-
 #   RUTAS WEB
-
 # =========================
-
-
 
 @app.route("/")
-
 def index():
-
     return render_template("index.html")
 
 
-
-
-
 @app.route("/api/listen-command", methods=["POST"])
-
 def listen_command():
-
     print("🎤 Web pide activar escucha...")
-
     
-
     try:
-
         prompt = motor_voz.escuchar_y_obtener_prompt()
-
         
-
         if prompt:
-
             # ✅ Marcamos que la fase de voz/STT ha terminado correctamente
-
             pipeline_flags["speech_done"] = True
 
-
-
             return jsonify({
-
                 "ok": True,
-
                 "transcript": prompt
-
             })
-
         else:
-
             return jsonify({
-
                 "ok": False,
-
                 "message": "No se detectó comando o se canceló."
-
             }), 400
 
-
-
     except Exception as e:
-
         print(f"❌ Error en el motor de voz: {e}")
-
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-
-
-
 # =========================
-
 #   OTROS ENDPOINTS (ESTADO, IMAGENES...)
-
 # =========================
-
-
 
 @app.route("/api/status")
-
 def api_status():
-
     """
-
     Devuelve el estado del pipeline para la UI:
-
       - progress_percent: 0-100
-
       - current_stage: id del paso actual
-
       - stages: lista con id y status ('pending' | 'active' | 'done')
-
     """
-
-
 
     # --- 1) Estado de la cara / sonrisa ---
-
     smile_state = smile_detector.get_state()
-
     face_present = smile_state.get("face_present", False)
-
     photo_taken = smile_state.get("photo_taken", False)
 
-
-
     # Lógica sencilla:
-
     # - Sin cara: face_detect = active, face_capture = pending
-
     # - Cara pero sin foto: face_detect = done, face_capture = active
-
     # - Foto hecha: face_detect = done, face_capture = done
-
     if photo_taken:
-
         face_detect_status = "done"
-
         face_capture_status = "done"
-
     elif face_present:
-
         face_detect_status = "done"
-
         face_capture_status = "active"
-
     else:
-
         face_detect_status = "active"
-
         face_capture_status = "pending"
 
-
-
     # --- 2) Estado de voz ---
-
     speech_done = pipeline_flags.get("speech_done", False)
-
     speech_status = "done" if speech_done else "pending"
 
-
-
     # Más adelante podrás cambiar estos cuando añadas IA, contornos, robot...
-
     ia_edit_status = "pending"
-
     contours_status = "pending"
-
     robot_draw_status = "pending"
 
-
-
     stages = [
-
         {"id": "face_detect",  "status": face_detect_status},
-
         {"id": "face_capture", "status": face_capture_status},
-
         {"id": "speech",       "status": speech_status},
-
         {"id": "ia_edit",      "status": ia_edit_status},
-
         {"id": "contours",     "status": contours_status},
-
         {"id": "robot_draw",   "status": robot_draw_status},
-
     ]
 
-
-
     # --- 3) Progreso global (porcentaje) ---
-
     done_count = sum(1 for s in stages if s["status"] == "done")
-
     total = len(stages)
-
     progress_percent = int(100 * done_count / total) if total > 0 else 0
 
-
-
     # --- 4) Etapa actual (primera que no está 'done') ---
-
     current_stage = "idle"
-
     for s in stages:
-
         if s["status"] != "done":
-
             current_stage = s["id"]
-
             break
 
-
-
     return jsonify({
-
         "progress_percent": progress_percent,
-
         "current_stage": current_stage,
-
         "stages": stages
-
     })
 
-
-
 @app.route("/api/ia-image-url")
-
 def ia_image_url():
-
     return jsonify({"url": url_for("static", filename="img/ia_placeholder.jpg")})
 
 
-
-
-
 @app.route("/robot_stream")
-
 def robot_stream():
-
     return url_for('static', filename='img/robot_placeholder.jpg')
 
 
-
-
-
 @app.route("/api/face-frame")
-
 def api_face_frame():
-
     """
-
     Devuelve el último frame de la cámara (con textos/caja) como JPEG.
-
     El frontend lo usará en el <img> de "Reconocimiento facial".
-
     """
-
     jpeg = smile_detector.get_frame_jpeg()
-
     if jpeg is None:
-
         # Si aún no hay frame, devolvemos el placeholder estático
-
         return app.send_static_file("img/face_placeholder.jpg")
-
     return Response(jpeg, mimetype="image/jpeg")
 
 
-
-
-
 @app.route("/api/face-status")
-
 def api_face_status():
-
     """
-
     Devuelve estado del detector de sonrisas:
-
     {
-
       happy, happy_threshold, face_present, photo_taken, capture_path, ...
-
     }
-
     """
-
     return jsonify(smile_detector.get_state())
 
-
-
 @app.route("/face_stream")
-
 def face_stream():
-
     # Por compatibilidad, devolvemos la URL del endpoint de frame
-
     return url_for("api_face_frame")
 
 
-
-
-
 if __name__ == "__main__":
-
     # use_reloader=False es vital para no cargar el modelo Vosk dos veces
-
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)(env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ cat static/js/main.js 
-
-document.addEventListener("DOMContentLoaded", () => {
-
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)document.addEventListener("DOMContentLoaded", () => {
     console.log("🚀 LeRobot Frontend cargado");
 
-
-
     // --- ELEMENTOS DEL DOM ---
-
     const recordBtn = document.getElementById("record-btn");
-
     const audioStatusPill = document.getElementById("audio-status-pill");
-
     const recordHint = document.getElementById("record-hint");
-
     const recordingVisual = document.querySelector(".recording-visual");
-
     const sttText = document.getElementById("stt-text");
 
-
-
     // Elementos del módulo de cara
-
     const faceStatusPill = document.getElementById("face-status-pill");
-
     const faceImage = document.getElementById("face-image");
 
-
-
     // Elementos de la barra de progreso (Pipeline)
-
     const pipelineProgressBar = document.getElementById("pipeline-progress-bar");
-
     const pipelineTimeline = document.getElementById("pipeline-timeline");
 
-
-
     // ==================================================
-
     // 1. LÓGICA DEL BOTÓN (ACTIVAR ESCUCHA DEL ROBOT)
-
     // ==================================================
-
     if (recordBtn) {
-
         recordBtn.addEventListener("click", async () => {
 
-
-
             // Evitar pulsar dos veces si ya está escuchando
-
             if (recordBtn.classList.contains("recording")) return;
 
-
-
             // --- A. CAMBIAR UI A MODO "ESCUCHANDO" ---
-
             console.log("🎤 Enviando orden de escuchar al robot...");
 
-
-
             // Activar animaciones CSS
-
             recordBtn.classList.add("recording");
-
             if (recordingVisual) recordingVisual.classList.add("recording");
 
-
-
             // Actualizar textos y etiquetas
-
             if (audioStatusPill) {
-
                 audioStatusPill.textContent = "Robot escuchando...";
-
                 audioStatusPill.className = "status-pill status-active"; // Verde/Activo
-
             }
-
             if (recordHint) {
-
                 recordHint.textContent = "Habla alto y claro al micrófono del robot";
-
             }
-
             if (sttText) {
-
                 sttText.innerHTML = '<span class="placeholder-text">🤖 Escuchando... (Di "Ponme un gorro", "gafas"...)</span>';
-
             }
-
-
 
             try {
-
                 // --- B. LLAMADA AL BACKEND (TRIGGER) ---
-
                 // Esto le dice a Python: "Ejecuta voice_engine.escuchar_y_obtener_prompt()"
-
                 const response = await fetch("/api/listen-command", {
-
                     method: "POST",
-
                     headers: {
-
                         "Content-Type": "application/json"
-
                     }
-
                 });
-
-
 
                 const data = await response.json();
 
-
-
                 // --- C. RESPUESTA RECIBIDA (FIN DE ESCUCHA) ---
-
                 // Desactivar animaciones
-
                 recordBtn.classList.remove("recording");
-
                 if (recordingVisual) recordingVisual.classList.remove("recording");
-
-
 
                 if (data.ok) {
-
                     // ÉXITO: El robot entendió y generó el prompt
-
                     console.log("✅ Prompt recibido:", data.transcript);
 
-
-
                     if (audioStatusPill) {
-
                         audioStatusPill.textContent = "Completado";
-
                         audioStatusPill.className = "status-pill status-done";
-
                     }
-
                     if (recordHint) {
-
                         recordHint.textContent = "Pulsa para grabar otra vez";
-
                     }
-
-
 
                     // Mostrar el prompt en inglés en la caja
-
                     if (sttText) {
-
                         sttText.innerText = data.transcript;
-
                     }
-
-
 
                     // Actualizar visualmente el paso en la timeline
-
                     markStageAsDone("speech");
 
-
-
                 } else {
-
                     // ERROR LÓGICO: El robot escuchó pero no entendió o se canceló
-
                     console.warn("⚠️", data.message);
-
                     if (audioStatusPill) {
-
                         audioStatusPill.textContent = "No entendido";
-
                         audioStatusPill.className = "status-pill status-pending"; // Naranja
-
                     }
-
                     if (recordHint) {
-
                         recordHint.textContent = "Inténtalo de nuevo";
-
                     }
-
                     if (sttText) {
-
                         sttText.innerHTML = `<span style="color: var(--accent-danger)">❌ ${data.message}</span>`;
-
                     }
-
                 }
-
-
 
             } catch (err) {
-
                 // --- D. ERROR DE RED/SERVIDOR ---
-
                 console.error("❌ Error de conexión:", err);
 
-
-
                 recordBtn.classList.remove("recording");
-
                 if (recordingVisual) recordingVisual.classList.remove("recording");
 
-
-
                 if (audioStatusPill) {
-
                     audioStatusPill.textContent = "Error de Conexión";
-
                     audioStatusPill.className = "status-pill status-pending";
-
                 }
-
                 if (sttText) {
-
                     sttText.innerText = "Error: El servidor Python no responde o el micrófono falló.";
-
                 }
-
             }
-
         });
-
     }
 
-
-
     // ==================================================
-
     // 2. ESTADO DEL PIPELINE (Polling cada 2s)
-
     // ==================================================
-
     async function refreshPipelineStatus() {
-
         try {
-
             const res = await fetch("/api/status");
-
             const data = await res.json();
 
-
-
             // Actualizar barra superior
-
             const percent = data.progress_percent || 0;
-
             if (pipelineProgressBar) {
-
                 pipelineProgressBar.style.width = `${percent}%`;
-
                 pipelineProgressBar.setAttribute("aria-valuenow", percent);
-
             }
-
-
 
             // Actualizar lista lateral (Timeline)
-
             if (!pipelineTimeline) return;
 
-
-
             const stageMap = {};
-
             (data.stages || []).forEach(s => {
-
                 stageMap[s.id] = s.status;
-
             });
-
-
 
             pipelineTimeline.querySelectorAll("li").forEach(li => {
-
                 const stageId = li.getAttribute("data-stage");
-
                 const status = stageMap[stageId] || "pending";
 
-
-
                 // Resetear clases si tu CSS las usa, pero principalmente usamos data-status
-
                 li.classList.remove("done", "active", "pending");
-
                 li.setAttribute("data-status", status);
-
             });
 
-
-
         } catch (err) {
-
             console.error("Error polling status:", err);
-
         }
-
     }
-
-
 
     // Función auxiliar para forzar visualmente un paso completado (Feedback inmediato)
-
     function markStageAsDone(stageId) {
-
         if (!pipelineTimeline) return;
-
         const li = pipelineTimeline.querySelector(`li[data-stage="${stageId}"]`);
-
         if (li) {
-
             li.setAttribute("data-status", "done");
-
         }
-
     }
-
-
 
     // Iniciar el bucle de estado
-
     setInterval(refreshPipelineStatus, 2000);
-
     refreshPipelineStatus();
 
-
-
     // ==================================================
-
     // 3. MÓDULO DE CARA: STREAM + ESTADO
-
     // ==================================================
-
     async function refreshFaceModule() {
-
         try {
-
             // 1) Actualizar imagen de la cámara
-
             if (faceImage) {
-
                 // Añadimos timestamp para evitar caché del navegador
-
                 faceImage.src = `/api/face-frame?t=${Date.now()}`;
-
             }
-
-
 
             // 2) Actualizar pill de estado (cara / sonrisa / captura)
-
             if (faceStatusPill) {
-
                 const res = await fetch("/api/face-status");
-
                 if (!res.ok) return;
 
-
-
                 const data = await res.json();
-
                 const happy = data.happy || 0;
-
                 const threshold = data.happy_threshold || 60;
 
-
-
                 if (data.photo_taken) {
-
                     faceStatusPill.textContent = "Foto capturada";
-
                     faceStatusPill.className = "status-pill status-done";
 
-
-
                     // Marcamos también la etapa de captura en la timeline
-
                     markStageAsDone("face_capture");
 
-
-
                 } else if (data.face_present) {
-
                     faceStatusPill.textContent =
-
                         `Rostro detectado (${happy.toFixed(0)}% feliz)`;
 
-
-
                     if (happy >= threshold) {
-
                         faceStatusPill.className = "status-pill status-active";
-
                     } else {
-
                         faceStatusPill.className = "status-pill status-idle";
-
                     }
 
-
-
                     // Marcamos la etapa de detección cuando haya rostro
-
                     markStageAsDone("face_detect");
 
-
-
                 } else {
-
                     faceStatusPill.textContent = "Esperando rostro";
-
                     faceStatusPill.className = "status-pill status-idle";
-
                 }
-
             }
-
         } catch (err) {
-
             console.error("Error refrescando módulo de cara:", err);
-
         }
-
     }
 
-
-
     // Refrescar cara cada 500 ms
-
     setInterval(refreshFaceModule, 800);
-
     refreshFaceModule();
-
 });
-
-(env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ cat templates/index.html 
-
-{% extends "base.html" %}
-
-
-
-{% block content %}
-
-
-
-<div class="row g-4 mb-3">
-
-    <div class="col-12">
-
-        <div class="hero-card p-4 rounded-4 shadow-lg d-flex flex-wrap align-items-center justify-content-between">
-
-            <div class="hero-text">
-
-                <h1 class="h3 fw-semibold mb-2">De una sonrisa a un dibujo en papel</h1>
-
-                <p class="text-secondary mb-0">
-
-                    1) La cámara detecta tu cara y espera a que sonrías.<br>
-
-                    2) Grabas una frase por voz para describir el objeto.<br>
-
-                    3) La IA edita la imagen y LeRobot la dibuja en papel.
-
-                </p>
-
-            </div>
-
-            <div class="hero-progress mt-3 mt-md-0">
-
-                <div class="small text-secondary mb-1 text-end">
-
-                    Estado del pipeline
-
-                </div>
-
-                <div class="progress pipeline-progress">
-
-                    <div class="progress-bar" id="pipeline-progress-bar"
-
-                         role="progressbar"
-
-                         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-
-                         style="width: 0%;">
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-</div>
-
-
-
-<div class="row g-4 mb-4">
-
-    <div class="col-lg-7">
-
-        <div class="card glass-card h-100">
-
-            <div class="card-header d-flex justify-content-between align-items-center border-0">
-
-                <div>
-
-                    <span class="badge bg-primary-soft me-2">
-
-                        <i class="bi bi-camera-video me-1"></i>Reconocimiento facial
-
-                    </span>
-
-                    <span class="text-secondary small">Esperando sonrisa...</span>
-
-                </div>
-
-                <span class="status-pill status-idle" id="face-status-pill">
-
-                    Esperando rostro
-
-                </span>
-
-            </div>
-
-            <div class="card-body">
-
-                <div class="video-frame mb-2">
-
-                    <img id="face-image"
-
-                        src="{{ url_for('static', filename='img/face_placeholder.jpg') }}"
-
-                        class="w-100 h-100 object-fit-cover"
-
-                        alt="Stream de reconocimiento facial">
-
-                </div>
-
-
-
-                <div class="d-flex justify-content-between align-items-center small text-secondary">
-
-                    <span><i class="bi bi-bounding-box-circles me-1"></i>Encuadre en tiempo real</span>
-
-                    <span><i class="bi bi-emoji-smile me-1"></i>Sonríe para capturar</span>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-
-
-    <div class="col-lg-5">
-
-        <div class="card glass-card h-100">
-
-            <div class="card-header border-0 d-flex justify-content-between align-items-center">
-
-                <div>
-
-                    <span class="badge bg-success-soft me-2">
-
-                        <i class="bi bi-mic-fill me-1"></i>Grabador de frase
-
-                    </span>
-
-                    <span class="text-secondary small">Solo grabar y enviar</span>
-
-                </div>
-
-                <span class="status-pill status-idle" id="audio-status-pill">
-
-                    Listo
-
-                </span>
-
-            </div>
-
-            <div class="card-body d-flex flex-column">
-
-                <div class="d-flex flex-column align-items-center mb-3">
-
-                    <button class="record-btn" id="record-btn">
-
-                        <i class="bi bi-mic-fill"></i>
-
-                    </button>
-
-                    <div class="small text-secondary mt-2 text-center" id="record-hint">
-
-                        Pulsa para grabar
-
-                    </div>
-
-                </div>
-
-
-
-                <div class="recording-visual mb-3">
-
-                    <div class="recording-bar"></div>
-
-                    <div class="recording-bar"></div>
-
-                    <div class="recording-bar"></div>
-
-                    <div class="recording-bar"></div>
-
-                    <div class="recording-bar"></div>
-
-                </div>
-
-
-
-                <div class="flex-grow-1">
-
-                    <label class="form-label small text-secondary mb-1">
-
-                        Transcripción
-
-                    </label>
-
-                    <div class="stt-box" id="stt-text">
-
-                        <span class="placeholder-text">La frase aparecerá aquí...</span>
-
-                    </div>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-</div>
-
-
-
-<div class="row g-4">
-
-    <div class="col-lg-7">
-
-        <div class="card glass-card h-100">
-
-            <div class="card-header border-0 d-flex justify-content-between align-items-center">
-
-                <div>
-
-                    <span class="badge bg-info-soft me-2">
-
-                        <i class="bi bi-stars me-1"></i>Resultado IA
-
-                    </span>
-
-                    <span class="text-secondary small">Imagen procesada</span>
-
-                </div>
-
-                <span class="status-pill status-pending" id="ia-status-pill">
-
-                    Pendiente
-
-                </span>
-
-            </div>
-
-            <div class="card-body row g-3">
-
-                <div class="col-md-6">
-
-                    <div class="video-frame mb-2">
-
-                        <img src="{{ url_for('static', filename='img/ia_placeholder.jpg') }}"
-
-                             id="ia-image"
-
-                             class="w-100 h-100 object-fit-cover"
-
-                             alt="Resultado IA">
-
-                    </div>
-
-                    <div class="small text-secondary">
-
-                        Input para el robot.
-
-                    </div>
-
-                </div>
-
-                <div class="col-md-6">
-
-                    <h6 class="small text-uppercase text-secondary mb-2">Pipeline</h6>
-
-                    <ul class="timeline small" id="pipeline-timeline">
-
-                        <li data-stage="face_detect">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">Detección</div>
-
-                            </div>
-
-                        </li>
-
-                        <li data-stage="face_capture">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">Captura</div>
-
-                            </div>
-
-                        </li>
-
-                        <li data-stage="speech">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">Audio/STT</div>
-
-                            </div>
-
-                        </li>
-
-                        <li data-stage="ia_edit">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">IA Generativa</div>
-
-                            </div>
-
-                        </li>
-
-                        <li data-stage="contours">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">Contornos</div>
-
-                            </div>
-
-                        </li>
-
-                        <li data-stage="robot_draw">
-
-                            <span class="dot"></span>
-
-                            <div class="content">
-
-                                <div class="title">Robot</div>
-
-                            </div>
-
-                        </li>
-
-                    </ul>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-
-
-    <div class="col-lg-5">
-
-        <div class="card glass-card h-100">
-
-            <div class="card-header border-0 d-flex justify-content-between align-items-center">
-
-                <div>
-
-                    <span class="badge bg-warning-soft me-2">
-
-                        <i class="bi bi-vector-pen me-1"></i>Cam Robot
-
-                    </span>
-
-                    <span class="text-secondary small">En vivo</span>
-
-                </div>
-
-                <span class="status-pill status-idle" id="robot-status-pill">
-
-                    Espera
-
-                </span>
-
-            </div>
-
-            <div class="card-body">
-
-                <div class="video-frame mb-2">
-
-                    <img src="{{ url_for('static', filename='img/robot_placeholder.jpg') }}"
-
-                         class="w-100 h-100 object-fit-cover"
-
-                         alt="Stream Robot">
-
-                </div>
-
-                <div class="small text-secondary d-flex justify-content-between">
-
-                    <span><i class="bi bi-eye me-1"></i>Visualización</span>
-
-                </div>
-
-            </div>
-
-        </div>
-
-    </div>
-
-</div>
-
-
-
-{% endblock %}(env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ cat templates/base.html 
-
 <!doctype html>
-
 <html lang="es">
-
 <head>
-
     <meta charset="utf-8">
-
     <title>LeRobot Face Painter</title>
-
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
-
-
     <link
-
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-
         rel="stylesheet"
-
         integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
-
         crossorigin="anonymous"
-
     >
-
     <link
-
         rel="stylesheet"
-
         href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css"
-
     >
-
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
-
 </head>
-
 <body class="app-body">
 
-
-
 <nav class="navbar navbar-expand-lg navbar-dark glass-nav">
-
     <div class="container">
-
         <a class="navbar-brand fw-semibold" href="#">
-
             <i class="bi bi-robot me-2"></i>LeRobot Face Painter
-
         </a>
-
     </div>
-
 </nav>
 
-
-
 <main class="py-4">
-
     <div class="container">
-
         {% block content %}{% endblock %}
-
     </div>
-
 </main>
 
-
-
 <footer class="py-3 small text-center text-secondary">
-
     LeRobot · Demo UI (Flask + Bootstrap)
-
 </footer>
 
-
-
 <script
-
     src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
-
     integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
-
     crossorigin="anonymous"
-
 ></script>
-
-
 
 <script src="{{ url_for('static', filename='js/main.js') }}"></script>
 
-
-
 </body>
+</html>{% extends "base.html" %}
 
-</html>(env) cab@cab-Prestige-16-AI-Studio-B1VFG:~/Deusto/Hackhaton/KT_Hackathon-LeRobot/web-server$ "
+{% block content %}
+
+<div class="row g-4 mb-3">
+    <div class="col-12">
+        <div class="hero-card p-4 rounded-4 shadow-lg d-flex flex-wrap align-items-center justify-content-between">
+            <div class="hero-text">
+                <h1 class="h3 fw-semibold mb-2">De una sonrisa a un dibujo en papel</h1>
+                <p class="text-secondary mb-0">
+                    1) La cámara detecta tu cara y espera a que sonrías.<br>
+                    2) Grabas una frase por voz para describir el objeto.<br>
+                    3) La IA edita la imagen y LeRobot la dibuja en papel.
+                </p>
+            </div>
+            <div class="hero-progress mt-3 mt-md-0">
+                <div class="small text-secondary mb-1 text-end">
+                    Estado del pipeline
+                </div>
+                <div class="progress pipeline-progress">
+                    <div class="progress-bar" id="pipeline-progress-bar"
+                         role="progressbar"
+                         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                         style="width: 0%;">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 mb-4">
+    <div class="col-lg-7">
+        <div class="card glass-card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center border-0">
+                <div>
+                    <span class="badge bg-primary-soft me-2">
+                        <i class="bi bi-camera-video me-1"></i>Reconocimiento facial
+                    </span>
+                    <span class="text-secondary small">Esperando sonrisa...</span>
+                </div>
+                <span class="status-pill status-idle" id="face-status-pill">
+                    Esperando rostro
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="video-frame mb-2">
+                    <img id="face-image"
+                        src="{{ url_for('static', filename='img/face_placeholder.jpg') }}"
+                        class="w-100 h-100 object-fit-cover"
+                        alt="Stream de reconocimiento facial">
+                </div>
+
+                <div class="d-flex justify-content-between align-items-center small text-secondary">
+                    <span><i class="bi bi-bounding-box-circles me-1"></i>Encuadre en tiempo real</span>
+                    <span><i class="bi bi-emoji-smile me-1"></i>Sonríe para capturar</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card glass-card h-100">
+            <div class="card-header border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge bg-success-soft me-2">
+                        <i class="bi bi-mic-fill me-1"></i>Grabador de frase
+                    </span>
+                    <span class="text-secondary small">Solo grabar y enviar</span>
+                </div>
+                <span class="status-pill status-idle" id="audio-status-pill">
+                    Listo
+                </span>
+            </div>
+            <div class="card-body d-flex flex-column">
+                <div class="d-flex flex-column align-items-center mb-3">
+                    <button class="record-btn" id="record-btn">
+                        <i class="bi bi-mic-fill"></i>
+                    </button>
+                    <div class="small text-secondary mt-2 text-center" id="record-hint">
+                        Pulsa para grabar
+                    </div>
+                </div>
+
+                <div class="recording-visual mb-3">
+                    <div class="recording-bar"></div>
+                    <div class="recording-bar"></div>
+                    <div class="recording-bar"></div>
+                    <div class="recording-bar"></div>
+                    <div class="recording-bar"></div>
+                </div>
+
+                <div class="flex-grow-1">
+                    <label class="form-label small text-secondary mb-1">
+                        Transcripción
+                    </label>
+                    <div class="stt-box" id="stt-text">
+                        <span class="placeholder-text">La frase aparecerá aquí...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="card glass-card h-100">
+            <div class="card-header border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge bg-info-soft me-2">
+                        <i class="bi bi-stars me-1"></i>Resultado IA
+                    </span>
+                    <span class="text-secondary small">Imagen procesada</span>
+                </div>
+                <span class="status-pill status-pending" id="ia-status-pill">
+                    Pendiente
+                </span>
+            </div>
+            <div class="card-body row g-3">
+                <div class="col-md-6">
+                    <div class="video-frame mb-2">
+                        <img src="{{ url_for('static', filename='img/ia_placeholder.jpg') }}"
+                             id="ia-image"
+                             class="w-100 h-100 object-fit-cover"
+                             alt="Resultado IA">
+                    </div>
+                    <div class="small text-secondary">
+                        Input para el robot.
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <h6 class="small text-uppercase text-secondary mb-2">Pipeline</h6>
+                    <ul class="timeline small" id="pipeline-timeline">
+                        <li data-stage="face_detect">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">Detección</div>
+                            </div>
+                        </li>
+                        <li data-stage="face_capture">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">Captura</div>
+                            </div>
+                        </li>
+                        <li data-stage="speech">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">Audio/STT</div>
+                            </div>
+                        </li>
+                        <li data-stage="ia_edit">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">IA Generativa</div>
+                            </div>
+                        </li>
+                        <li data-stage="contours">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">Contornos</div>
+                            </div>
+                        </li>
+                        <li data-stage="robot_draw">
+                            <span class="dot"></span>
+                            <div class="content">
+                                <div class="title">Robot</div>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card glass-card h-100">
+            <div class="card-header border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge bg-warning-soft me-2">
+                        <i class="bi bi-vector-pen me-1"></i>Cam Robot
+                    </span>
+                    <span class="text-secondary small">En vivo</span>
+                </div>
+                <span class="status-pill status-idle" id="robot-status-pill">
+                    Espera
+                </span>
+            </div>
+            <div class="card-body">
+                <div class="video-frame mb-2">
+                    <img src="{{ url_for('static', filename='img/robot_placeholder.jpg') }}"
+                         class="w-100 h-100 object-fit-cover"
+                         alt="Stream Robot">
+                </div>
+                <div class="small text-secondary d-flex justify-content-between">
+                    <span><i class="bi bi-eye me-1"></i>Visualización</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}# reconcoimiento_facial/smile_detector.py
+
+import threading
+import time
+from typing import Optional, Dict, Any, Tuple
+
+import cv2
+import numpy as np
+from deepface import DeepFace
+
+
+class SmileDetector:
+    """Captura vídeo, mide 'happy' con DeepFace y dispara una foto al sonreír.
+
+    - No abre ventanas de OpenCV.
+    - Solo detecta caras dentro del ROI central (el recuadro blanco).
+    - Marca únicamente la mejor cara (más grande) dentro del ROI.
+    - Usa directamente la caja de DeepFace (sin suavizado de posición).
+    - Guarda la foto en disco y expone:
+        * último frame anotado (para servirlo por HTTP)
+        * estado actual (happy_smooth, si ya hay foto, etc.)
+    """
+
+    def __init__(
+        self,
+        cam_index: int = 0,
+        frame_w: int = 1920,
+        frame_h: int = 1080,
+        happy_threshold: float = 60.0,
+        min_smile_frames: int = 5,
+        process_every_n: int = 2,
+        detector_backend: str = "retinaface",
+        capture_path: str = "smile_capture.jpg",
+        center_rect: Tuple[float, float, float, float] = (0.2, 0.2, 0.8, 0.8),
+        box_smooth_alpha: float = 0.7,      # ya no se usa, pero lo mantengo por compatibilidad
+        happy_smooth_alpha: float = 0.7,
+        miss_tol_frames: int = 5,
+    ) -> None:
+        self.cam_index = cam_index
+        self.frame_w = frame_w
+        self.frame_h = frame_h
+
+        self.happy_threshold = happy_threshold
+        self.min_smile_frames = min_smile_frames
+        self.process_every_n = process_every_n
+
+        self.detector_backend = detector_backend
+        self.capture_path = capture_path
+
+        self.center_rect = center_rect
+        self.box_smooth_alpha = box_smooth_alpha
+        self.happy_smooth_alpha = happy_smooth_alpha
+        self.miss_tol_frames = miss_tol_frames
+
+        # Estado interno
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+        self._lock = threading.Lock()
+        self._last_frame: Optional[np.ndarray] = None
+        self._happy_smooth: float = 0.0
+        self._face_present: bool = False
+        self._photo_taken: bool = False
+
+        # Para depurar si hace falta
+        self._debug_last_happy_raw: float = 0.0
+
+    # ===========================
+    #     API pública (Flask)
+    # ===========================
+
+    def start(self) -> None:
+        """Arranca el hilo de captura y análisis (no bloqueante)."""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Detiene el hilo de captura (por ejemplo al cerrar la app)."""
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+    def get_frame_jpeg(self) -> Optional[bytes]:
+        """Devuelve el último frame ANOTADO como bytes JPEG."""
+        with self._lock:
+            if self._last_frame is None:
+                return None
+            ok, buf = cv2.imencode(".jpg", self._last_frame)
+        if not ok:
+            return None
+        return buf.tobytes()
+
+    def get_state(self) -> Dict[str, Any]:
+        """Devuelve un snapshot del estado actual para exponerlo por API."""
+        with self._lock:
+            state = {
+                "happy": float(self._happy_smooth),
+                "happy_threshold": float(self.happy_threshold),
+                "face_present": bool(self._face_present),
+                "photo_taken": bool(self._photo_taken),
+                "capture_path": self.capture_path if self._photo_taken else None,
+                "debug_last_happy_raw": float(self._debug_last_happy_raw),
+            }
+        return state
+
+    # ===========================
+    #     Bucle interno
+    # ===========================
+
+    def _loop(self) -> None:
+        cap = cv2.VideoCapture(self.cam_index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.frame_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.frame_h)
+
+        if not cap.isOpened():
+            print("[SmileDetector] No se pudo abrir la cámara")
+            self._running = False
+            return
+
+        frame_idx = 0
+        happy_smooth: Optional[float] = None
+
+        last_box: Optional[Tuple[float, float, float, float]] = None
+        miss_count = 0
+        smile_consec = 0
+
+        print(
+            f"[SmileDetector] Iniciado. Umbral happy_smooth > {self.happy_threshold:.0f}% "
+            f"durante {self.min_smile_frames} frames."
+        )
+
+        cx1_rel, cy1_rel, cx2_rel, cy2_rel = self.center_rect
+
+        try:
+            while self._running:
+                ok, frame = cap.read()
+                if not ok:
+                    print("[SmileDetector] Frame no válido, saliendo del bucle.")
+                    break
+
+                display = frame.copy()
+                h, w = display.shape[:2]
+
+                # Rectángulo central guía (ROI)
+                cx1 = int(w * cx1_rel)
+                cy1 = int(h * cy1_rel)
+                cx2 = int(w * cx2_rel)
+                cy2 = int(h * cy2_rel)
+                cv2.rectangle(display, (cx1, cy1), (cx2, cy2), (255, 255, 255), 1)
+
+                # Recortamos el ROI: solo detectamos caras dentro del recuadro blanco
+                roi = frame[cy1:cy2, cx1:cx2]
+
+                new_happy: Optional[float] = None
+                new_box: Optional[Tuple[float, float, float, float]] = None
+
+                # DeepFace cada N frames (sobre el ROI, no sobre toda la imagen)
+                if frame_idx % self.process_every_n == 0:
+                    try:
+                        result = DeepFace.analyze(
+                            img_path=roi,
+                            actions=["emotion"],
+                            detector_backend=self.detector_backend,
+                            enforce_detection=False,
+                        )
+
+                        # DeepFace puede devolver dict o lista de dicts (varias caras)
+                        if isinstance(result, list):
+                            candidates = result
+                        else:
+                            candidates = [result]
+
+                        best_region = None
+                        best_emotions = None
+                        best_area = 0.0
+
+                        for r in candidates:
+                            region = r.get("region", {})
+                            if (
+                                not region
+                                or region.get("w", 0) <= 0
+                                or region.get("h", 0) <= 0
+                            ):
+                                continue
+
+                            w_face = float(region["w"])
+                            h_face = float(region["h"])
+                            area = w_face * h_face
+                            if area <= 0:
+                                continue
+
+                            if area > best_area:
+                                best_area = area
+                                best_region = region
+                                best_emotions = r.get("emotion", {})
+
+                        if best_region is not None and best_emotions is not None:
+                            # Emociones de la mejor cara
+                            new_happy = float(best_emotions.get("happy", 0.0))
+
+                            # Convertimos coords ROI -> coords globales de la imagen
+                            x_roi = float(best_region["x"])
+                            y_roi = float(best_region["y"])
+                            ww = float(best_region["w"])
+                            hh = float(best_region["h"])
+
+                            x = x_roi + cx1
+                            y = y_roi + cy1
+                            new_box = (x, y, ww, hh)
+
+                    except Exception as e:
+                        # Si falla DeepFace, no paramos todo
+                        print(f"[SmileDetector] Error en DeepFace: {e}")
+                        new_happy = None
+                        new_box = None
+
+                # Suavizado de happy (mantenemos para que no salte tanto)
+                if new_happy is not None:
+                    if happy_smooth is None:
+                        happy_smooth = new_happy
+                    else:
+                        happy_smooth = (
+                            self.happy_smooth_alpha * happy_smooth
+                            + (1.0 - self.happy_smooth_alpha) * new_happy
+                        )
+                elif happy_smooth is None:
+                    happy_smooth = 0.0
+
+                # Gestión de caja SIN suavizado de posición:
+                # usamos siempre la última detección directa, solo con tolerancia de pérdida
+                if new_box is not None:
+                    miss_count = 0
+                    last_box = new_box
+                else:
+                    if last_box is not None:
+                        miss_count += 1
+                        if miss_count > self.miss_tol_frames:
+                            last_box = None
+                            miss_count = 0
+
+                # Dibujar caja si la tenemos
+                face_present = last_box is not None
+                if last_box is not None:
+                    x, y, ww, hh = last_box
+                    x1 = max(0, int(x))
+                    y1 = max(0, int(y))
+                    x2 = min(w, int(x + ww))
+                    y2 = min(h, int(y + hh))
+                    cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                # Lógica de sonrisa / disparo de foto
+                happy_to_show = float(happy_smooth if happy_smooth is not None else 0.0)
+                photo_taken_now = False
+
+                if (
+                    happy_to_show >= self.happy_threshold
+                    and not self._photo_taken
+                ):
+                    smile_consec += 1
+                else:
+                    smile_consec = 0
+
+                if not self._photo_taken and smile_consec >= self.min_smile_frames:
+                    # Guardamos la foto (frame original, sin overlays)
+                    try:
+                        cv2.imwrite(self.capture_path, frame)
+                        print(
+                            f"[SmileDetector] Sonrisa detectada (happy_smooth={happy_to_show:.1f}%). "
+                            f"Foto guardada en {self.capture_path}"
+                        )
+                        photo_taken_now = True
+                    except Exception as e:
+                        print(f"[SmileDetector] Error guardando la foto: {e}")
+
+                # Texto en el frame
+                cv2.putText(
+                    display,
+                    f"Happy (suavizado): {happy_to_show:.1f}%",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0)
+                    if happy_to_show >= self.happy_threshold
+                    else (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                if self._photo_taken or photo_taken_now:
+                    status_text = "Foto capturada. Sonríe de nuevo para reemplazar."
+                    status_color = (0, 255, 0)
+                else:
+                    status_text = "Mete tu cara en el recuadro y SONRIE fuerte."
+                    status_color = (255, 255, 255)
+
+                cv2.putText(
+                    display,
+                    status_text,
+                    (20, display.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    status_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                # Actualizamos estado compartido
+                with self._lock:
+                    self._last_frame = display
+                    self._happy_smooth = happy_to_show
+                    self._face_present = face_present
+                    if photo_taken_now:
+                        self._photo_taken = True
+                    self._debug_last_happy_raw = float(new_happy or 0.0)
+
+                frame_idx += 1
+                # Mini pausa para no saturar CPU
+                time.sleep(0.01)
+
+        finally:
+            cap.release()
+            print("[SmileDetector] Cámara liberada, fin del hilo.")
+            self._running = False
